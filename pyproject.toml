@@ -1,0 +1,32 @@
+[project]
+name = "open-video-summary"
+version = "0.1.0"
+description = "Local-first multilingual video summarization for Apple Silicon Macs"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+  "fastapi>=0.116.0",
+  "orjson>=3.10.0",
+  "pydantic>=2.9.0",
+  "uvicorn>=0.35.0",
+]
+
+[project.optional-dependencies]
+dev = [
+  "httpx>=0.28.0",
+  "pytest>=8.3.0",
+]
+mlx = [
+  "mlx-lm>=0.22.0",
+  "mlx-whisper>=0.4.0",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["backend/tests"]
+
+[build-system]
+requires = ["setuptools>=69.0"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["backend*"]

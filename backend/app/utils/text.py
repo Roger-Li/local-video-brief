@@ -1,0 +1,40 @@
+from __future__ import annotations
+
+import re
+
+
+CHINESE_CHAR_RE = re.compile(r"[\u4e00-\u9fff]")
+
+
+def detect_language(text: str) -> str:
+    if not text.strip():
+        return "unknown"
+    chinese_count = len(CHINESE_CHAR_RE.findall(text))
+    ratio = chinese_count / max(len(text), 1)
+    if ratio > 0.1:
+        return "zh"
+    if re.search(r"[A-Za-z]", text):
+        return "en"
+    return "unknown"
+
+
+def split_sentences(text: str, limit: int = 2) -> list[str]:
+    normalized = re.sub(r"\s+", " ", text).strip()
+    if not normalized:
+        return []
+    parts = re.split(r"(?<=[.!?。！？])\s+", normalized)
+    return [part.strip() for part in parts if part.strip()][:limit]
+
+
+def chunk_text(text: str, max_chars: int) -> list[str]:
+    normalized = re.sub(r"\s+", " ", text).strip()
+    if not normalized:
+        return []
+    chunks: list[str] = []
+    start = 0
+    while start < len(normalized):
+        end = min(start + max_chars, len(normalized))
+        chunks.append(normalized[start:end])
+        start = end
+    return chunks
+
