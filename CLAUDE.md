@@ -8,7 +8,7 @@ This repository builds a local-first video summary tool for Apple Silicon Macs. 
 
 - Backend: FastAPI app in `backend/app`
 - Frontend: React/Vite app in `frontend`
-- Persistence: SQLite in `data/open_video_summary.sqlite3`
+- Persistence: SQLite in `data/local_video_brief.sqlite3`
 - Artifacts: local files under `artifacts/`
 - Smoke test entrypoint: `scripts/test_video_job.sh`
 

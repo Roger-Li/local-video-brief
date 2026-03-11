@@ -1,4 +1,4 @@
-# Open Video Summary
+# Local Video Brief
 
 Local-first video summarization for Apple Silicon Macs. The app ingests YouTube, bilibili, and other `yt-dlp`-compatible video URLs, prefers platform captions, falls back to local ASR, and produces bilingual English/Chinese chapter summaries.
 

@@ -1,5 +1,5 @@
 {
-  "name": "open-video-summary-frontend",
+  "name": "local-video-brief-frontend",
   "private": true,
   "version": "0.1.0",
   "type": "module",
@@ -21,4 +21,3 @@
     "vite": "^5.4.11"
   }
 }
-

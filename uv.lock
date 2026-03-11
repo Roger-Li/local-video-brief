@@ -782,7 +782,7 @@ wheels = [
 ]
 
 [[package]]
-name = "open-video-summary"
+name = "local-video-brief"
 version = "0.1.0"
 source = { editable = "." }
 dependencies = [

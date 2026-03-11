@@ -53,9 +53,9 @@ def _csv_env(name: str, default: List[str]) -> List[str]:
 
 @dataclass(frozen=True)
 class Settings:
-    app_name: str = field(default_factory=lambda: os.getenv("OVS_APP_NAME", "Open Video Summary"))
+    app_name: str = field(default_factory=lambda: os.getenv("OVS_APP_NAME", "Local Video Brief"))
     database_path: Path = field(
-        default_factory=lambda: Path(os.getenv("OVS_DATABASE_PATH", "data/open_video_summary.sqlite3"))
+        default_factory=lambda: Path(os.getenv("OVS_DATABASE_PATH", "data/local_video_brief.sqlite3"))
     )
     artifact_root: Path = field(default_factory=lambda: Path(os.getenv("OVS_ARTIFACT_ROOT", "artifacts")))
     worker_poll_interval: int = field(default_factory=lambda: int(os.getenv("OVS_WORKER_POLL_INTERVAL", "2")))

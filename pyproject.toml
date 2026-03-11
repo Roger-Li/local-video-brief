@@ -1,5 +1,5 @@
 [project]
-name = "open-video-summary"
+name = "local-video-brief"
 version = "0.1.0"
 description = "Local-first multilingual video summarization for Apple Silicon Macs"
 readme = "README.md"
