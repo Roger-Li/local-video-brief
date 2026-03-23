@@ -7,7 +7,7 @@ Local-first video summarization for Apple Silicon Macs. The app ingests YouTube,
 - Backend: FastAPI, SQLite, subprocess adapters for `yt-dlp` and `ffmpeg`
 - Frontend: React, TypeScript, Vite
 - ASR: `mlx-whisper` with Whisper `large-v3` or `large-v3-turbo`
-- Summarization: `mlx-lm` with `Qwen3.5-9B` 4-bit by default
+- Summarization: `mlx-lm` with Qwen3.5 (default `Qwen3.5-9B-Instruct-4bit`, tested with `Qwen3.5-27B-6bit`)
 
 ## Repo Layout
 
@@ -73,10 +73,15 @@ For a real end-to-end smoke test against the bilibili URL used during developmen
 
 That script starts an isolated backend on port `8010`, forces `OVS_ENABLE_MLX_ASR=true`, submits the test URL, polls until completion, and saves the result JSON under `artifacts/test-runs/`.
 
-You can also pass a different URL:
+You can also pass a different URL or use an external Python environment:
 
 ```bash
 ./scripts/test_video_job.sh "https://www.youtube.com/watch?v=Lk_OQufs1HQ"
+
+# Use a different Python env and enable MLX summarization
+OVS_TEST_PYTHON=$HOME/ml-env/bin/python \
+OVS_TEST_ENABLE_MLX_SUMMARIZER=true \
+./scripts/test_video_job.sh "https://www.youtube.com/watch?v=oeqPrUmVz-o"
 ```
 
 ## Current Workflow
@@ -98,7 +103,6 @@ You can also pass a different URL:
 ## Known Limitations
 
 - The fallback summarizer is intentionally simple and mainly exists to validate the pipeline without requiring `mlx-lm`.
-- Some YouTube caption files contain inline timing and formatting tags that are not yet stripped during VTT parsing, so summaries can include raw caption markup.
 - Caption availability and rate limits are source-dependent; the pipeline now tolerates partial subtitle-language failures, but providers can still block requests entirely.
 
 ## Notes

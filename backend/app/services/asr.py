@@ -1,9 +1,13 @@
 from __future__ import annotations
 
+import logging
+import time
 from pathlib import Path
 
 from backend.app.core.config import Settings
 from backend.app.utils.text import detect_language
+
+logger = logging.getLogger(__name__)
 
 ASR_MODEL_ALIASES = {
     "tiny": "mlx-community/whisper-tiny",
@@ -42,10 +46,17 @@ class MlxWhisperAsrService:
                 "mlx-whisper is not installed. Run `uv sync --extra mlx` and set OVS_ENABLE_MLX_ASR=true."
             ) from exc
 
+        model_name = resolve_asr_model_name(self.settings.asr_model)
+        audio_size_mb = audio_path.stat().st_size / (1024 * 1024)
+        logger.info("ASR start: model=%s audio=%s (%.1f MB)", model_name, audio_path.name, audio_size_mb)
+        t0 = time.perf_counter()
         result = transcribe(
             str(audio_path),
-            path_or_hf_repo=resolve_asr_model_name(self.settings.asr_model),
+            path_or_hf_repo=model_name,
         )
+        elapsed = time.perf_counter() - t0
+        logger.info("ASR transcription complete in %.1fs, language=%s", elapsed, result.get("language", "?"))
+
         segments: list[dict] = []
         for segment in result.get("segments", []):
             text = segment.get("text", "").strip()
@@ -61,4 +72,7 @@ class MlxWhisperAsrService:
                     "confidence": None,
                 }
             )
+        total_chars = sum(len(s["text"]) for s in segments)
+        duration_s = segments[-1]["end_s"] if segments else 0
+        logger.info("ASR result: %d segments, %d chars, %.0fs audio duration", len(segments), total_chars, duration_s)
         return segments

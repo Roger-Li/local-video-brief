@@ -70,6 +70,9 @@ class Settings:
     summarizer_max_input_chars: int = field(
         default_factory=lambda: int(os.getenv("OVS_SUMMARIZER_MAX_INPUT_CHARS", "18000"))
     )
+    summarizer_max_tokens: int = field(
+        default_factory=lambda: int(os.getenv("OVS_SUMMARIZER_MAX_TOKENS", "2048"))
+    )
     enable_mlx_summarizer: bool = field(
         default_factory=lambda: os.getenv("OVS_ENABLE_MLX_SUMMARIZER", "false").lower() == "true"
     )

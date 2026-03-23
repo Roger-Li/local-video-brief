@@ -19,6 +19,7 @@ This repository builds a local-first video summary tool for Apple Silicon Macs. 
 - For real provider tests, prefer `scripts/test_video_job.sh` over ad hoc curl sequences because it forces the required ASR flags and captures logs and outputs.
 - `OVS_ENABLE_MLX_ASR=true` is required for videos without usable captions.
 - `OVS_ENABLE_MLX_SUMMARIZER=true` is optional for smoke tests; the fallback summarizer is acceptable for pipeline validation.
+- The smoke-test script accepts `OVS_TEST_PYTHON` to override the Python interpreter (e.g., `OVS_TEST_PYTHON=$HOME/ml-env/bin/python`).
 
 ## Caption Fetch Policy
 
@@ -41,9 +42,15 @@ This repository builds a local-first video summary tool for Apple Silicon Macs. 
 
 - Successful smoke-test outputs are written to `artifacts/test-runs/<job-id>-result.json`.
 
+## Summarizer Notes
+
+- The MLX summarizer uses chat template formatting via `tokenizer.apply_chat_template()`. Prompt construction lives in `summarizer.py._build_prompt()` (returns system/user message tuple).
+- Qwen3.5 models have a "thinking" mode; `/no_think` is appended to the user message to suppress it. The `_extract_json()` method also strips `<think>` blocks and markdown fences as a safety net.
+- `max_tokens` is dynamic: `max(OVS_SUMMARIZER_MAX_TOKENS, 512 * chapters + 512)`.
+- Only essential metadata fields (title, description, duration, upload_date, channel, tags) are passed to the prompt — the full yt-dlp dump is too large.
+
 ## Known Limitations
 
-- YouTube VTT files may include inline formatting/timestamp markup that should eventually be cleaned during transcript parsing.
 - Provider rate limits can still block extraction entirely.
 - There is no auth, cloud sync, OCR, diarization, or Q&A flow in this repo.
 

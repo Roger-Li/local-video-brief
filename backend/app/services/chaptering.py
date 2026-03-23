@@ -1,6 +1,10 @@
 from __future__ import annotations
 
+import logging
+
 from backend.app.core.config import Settings
+
+logger = logging.getLogger(__name__)
 
 
 class HeuristicChapterer:
@@ -10,6 +14,9 @@ class HeuristicChapterer:
     def build_chapters(self, transcript_segments: list[dict]) -> list[dict]:
         if not transcript_segments:
             return []
+
+        logger.info("building chapters: %d segments, max_chapter_seconds=%d",
+                     len(transcript_segments), self.max_chapter_seconds)
 
         chapters: list[dict] = []
         current_segments: list[dict] = []
@@ -25,6 +32,9 @@ class HeuristicChapterer:
             duration = segment["end_s"] - chapter_start
             gap = segment["start_s"] - prev_segment["end_s"]
             if gap >= 45 or duration >= self.max_chapter_seconds:
+                reason = "gap" if gap >= 45 else "duration"
+                logger.debug("chapter break at %.1fs: gap=%.1fs duration=%.1fs reason=%s",
+                             segment["start_s"], gap, duration, reason)
                 chapters.append(self._build_chapter(current_segments))
                 current_segments = [segment]
                 chapter_start = segment["start_s"]
@@ -33,6 +43,10 @@ class HeuristicChapterer:
 
         if current_segments:
             chapters.append(self._build_chapter(current_segments))
+
+        if chapters:
+            logger.info("built %d chapters spanning %.0fs-%.0fs",
+                         len(chapters), chapters[0]["start_s"], chapters[-1]["end_s"])
         return chapters
 
     def _build_chapter(self, segments: list[dict]) -> dict:

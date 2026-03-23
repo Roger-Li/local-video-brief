@@ -9,6 +9,7 @@ BASE_URL="http://${HOST}:${PORT}"
 LOG_DIR="${ROOT_DIR}/artifacts/test-runs"
 SERVER_LOG="${LOG_DIR}/backend-${PORT}.log"
 ENABLE_SUMMARIZER="${OVS_TEST_ENABLE_MLX_SUMMARIZER:-false}"
+PYTHON="${OVS_TEST_PYTHON:-${ROOT_DIR}/.venv/bin/python}"
 
 mkdir -p "${LOG_DIR}"
 
@@ -23,8 +24,8 @@ trap cleanup EXIT
 
 cd "${ROOT_DIR}"
 
-if [[ ! -x ".venv/bin/python" ]]; then
-  echo "error: project virtualenv is missing. Run 'uv sync --extra mlx' first." >&2
+if [[ ! -x "${PYTHON}" ]]; then
+  echo "error: python not found at ${PYTHON}. Set OVS_TEST_PYTHON or create a .venv." >&2
   exit 1
 fi
 
@@ -39,7 +40,7 @@ if ! command -v yt-dlp >/dev/null 2>&1; then
 fi
 
 echo "Verifying project runtime..."
-OVS_ENABLE_MLX_ASR=true OVS_ENABLE_MLX_SUMMARIZER="${ENABLE_SUMMARIZER}" ./.venv/bin/python - <<'PY'
+OVS_ENABLE_MLX_ASR=true OVS_ENABLE_MLX_SUMMARIZER="${ENABLE_SUMMARIZER}" "${PYTHON}" - <<'PY'
 import importlib.util
 from backend.app.core.config import get_settings
 
@@ -53,7 +54,7 @@ PY
 echo "Starting isolated backend on ${BASE_URL}..."
 OVS_ENABLE_MLX_ASR=true \
 OVS_ENABLE_MLX_SUMMARIZER="${ENABLE_SUMMARIZER}" \
-./.venv/bin/python -m uvicorn backend.app.main:app --host "${HOST}" --port "${PORT}" >"${SERVER_LOG}" 2>&1 &
+"${PYTHON}" -m uvicorn backend.app.main:app --host "${HOST}" --port "${PORT}" >"${SERVER_LOG}" 2>&1 &
 SERVER_PID=$!
 
 for _ in $(seq 1 60); do
@@ -74,7 +75,7 @@ JOB_ID="$(
   curl -fsS -X POST "${BASE_URL}/jobs" \
     -H 'Content-Type: application/json' \
     -d "{\"url\":\"${URL}\",\"output_languages\":[\"en\",\"zh-CN\"],\"mode\":\"captions_first\"}" \
-  | ./.venv/bin/python -c 'import json,sys; print(json.load(sys.stdin)["job_id"])'
+  | "${PYTHON}" -c 'import json,sys; print(json.load(sys.stdin)["job_id"])'
 )"
 
 echo "job_id=${JOB_ID}"
@@ -86,10 +87,10 @@ SLEEP_SECONDS="${OVS_TEST_POLL_INTERVAL:-2}"
 while true; do
   STATUS_JSON="$(curl -fsS "${BASE_URL}/jobs/${JOB_ID}")"
   STATUS="$(
-    printf '%s' "${STATUS_JSON}" | ./.venv/bin/python -c 'import json,sys; print(json.load(sys.stdin)["status"])'
+    printf '%s' "${STATUS_JSON}" | "${PYTHON}" -c 'import json,sys; print(json.load(sys.stdin)["status"])'
   )"
   STAGE="$(
-    printf '%s' "${STATUS_JSON}" | ./.venv/bin/python -c 'import json,sys; print(json.load(sys.stdin)["progress_stage"])'
+    printf '%s' "${STATUS_JSON}" | "${PYTHON}" -c 'import json,sys; print(json.load(sys.stdin)["progress_stage"])'
   )"
   echo "status=${STATUS} stage=${STAGE}"
 
@@ -122,7 +123,7 @@ printf '%s\n' "${RESULT_JSON}" > "${RESULT_PATH}"
 
 echo "Job completed successfully."
 echo "Saved result to ${RESULT_PATH}"
-RESULT_PATH="${RESULT_PATH}" ./.venv/bin/python - <<'PY'
+RESULT_PATH="${RESULT_PATH}" "${PYTHON}" - <<'PY'
 import json
 import os
 
