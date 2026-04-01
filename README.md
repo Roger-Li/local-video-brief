@@ -7,7 +7,7 @@ Local-first video summarization for Apple Silicon Macs. The app ingests YouTube,
 - Backend: FastAPI, SQLite, subprocess adapters for `yt-dlp` and `ffmpeg`
 - Frontend: React, TypeScript, Vite
 - ASR: `mlx-whisper` with Whisper `large-v3` or `large-v3-turbo`
-- Summarization: `mlx-lm` with Qwen3.5 (default `Qwen3.5-9B-Instruct-4bit`, tested with `Qwen3.5-27B-6bit`)
+- Summarization: `mlx-lm` (in-process) or oMLX server (remote, OpenAI-compatible) with Qwen3.5 (default `Qwen3.5-9B-Instruct-4bit`, tested with `Qwen3.5-27B-6bit`)
 
 ## Repo Layout
 
@@ -65,6 +65,20 @@ OVS_ENABLE_MLX_ASR=true
 OVS_ENABLE_MLX_SUMMARIZER=true
 ```
 
+For oMLX-based summarization (remote model server):
+
+```bash
+uv sync --extra omlx
+```
+
+Then set:
+
+```bash
+OVS_SUMMARIZER_PROVIDER=omlx
+OVS_OMLX_BASE_URL=http://localhost:8080/v1
+OVS_OMLX_MODEL=<your-model-name>
+```
+
 For a real end-to-end smoke test against the bilibili URL used during development:
 
 ```bash
@@ -82,6 +96,12 @@ You can also pass a different URL or use an external Python environment:
 OVS_TEST_PYTHON=$HOME/ml-env/bin/python \
 OVS_TEST_ENABLE_MLX_SUMMARIZER=true \
 ./scripts/test_video_job.sh "https://www.youtube.com/watch?v=oeqPrUmVz-o"
+
+# Use oMLX provider
+OVS_TEST_SUMMARIZER_PROVIDER=omlx \
+OVS_OMLX_BASE_URL=http://localhost:8080/v1 \
+OVS_OMLX_MODEL=<model> \
+./scripts/test_video_job.sh
 ```
 
 ## Current Workflow
@@ -108,13 +128,18 @@ OVS_TEST_ENABLE_MLX_SUMMARIZER=true \
 
 | Variable | Default | Description |
 |---|---|---|
+| `OVS_SUMMARIZER_PROVIDER` | *(auto)* | Summarizer: `fallback`, `mlx`, or `omlx` |
 | `OVS_ENABLE_MLX_ASR` | `false` | Enable local Whisper ASR for captionless videos |
-| `OVS_ENABLE_MLX_SUMMARIZER` | `false` | Enable MLX LLM summarization (requires `mlx-lm`) |
+| `OVS_ENABLE_MLX_SUMMARIZER` | `false` | Legacy: maps to `OVS_SUMMARIZER_PROVIDER=mlx` |
 | `OVS_ENABLE_TRANSCRIPT_NORMALIZATION` | `true` | Enable transcript dedup/cleanup before chaptering |
 | `OVS_SUMMARIZER_MODEL` | `Qwen3.5-9B-Instruct-4bit` | MLX model repo for summarization |
 | `OVS_ASR_MODEL` | `large-v3-turbo` | Whisper model (alias or full MLX repo id) |
 | `OVS_MAX_CHAPTER_MINUTES` | `8` | Max chapter duration before forced split |
 | `OVS_SUMMARIZER_MAX_TOKENS` | `2048` | Base max tokens for LLM generation |
+| `OVS_OMLX_BASE_URL` | | oMLX server URL ending in `/v1` (required for `omlx`) |
+| `OVS_OMLX_MODEL` | | Model name for oMLX requests (required for `omlx`) |
+| `OVS_OMLX_API_KEY` | | Optional bearer token for oMLX |
+| `OVS_OMLX_TIMEOUT_SECONDS` | `180` | Request timeout for oMLX calls |
 
 ## Known Limitations
 

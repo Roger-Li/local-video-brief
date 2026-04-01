@@ -53,6 +53,94 @@ def test_caption_language_priority_prefers_english_then_chinese(tmp_path: Path) 
     ]
 
 
+def test_provider_explicit_omlx(monkeypatch) -> None:
+    monkeypatch.setenv("OVS_SUMMARIZER_PROVIDER", "omlx")
+    monkeypatch.setenv("OVS_OMLX_BASE_URL", "http://localhost:8080/v1")
+    monkeypatch.setenv("OVS_OMLX_MODEL", "test-model")
+    settings = Settings()
+    assert settings.summarizer_provider == "omlx"
+    assert settings.omlx_base_url == "http://localhost:8080/v1"
+    assert settings.omlx_model == "test-model"
+
+
+def test_provider_explicit_mlx(monkeypatch) -> None:
+    monkeypatch.setenv("OVS_SUMMARIZER_PROVIDER", "mlx")
+    monkeypatch.delenv("OVS_OMLX_BASE_URL", raising=False)
+    settings = Settings()
+    assert settings.summarizer_provider == "mlx"
+
+
+def test_provider_explicit_fallback(monkeypatch) -> None:
+    monkeypatch.setenv("OVS_SUMMARIZER_PROVIDER", "fallback")
+    settings = Settings()
+    assert settings.summarizer_provider == "fallback"
+
+
+def test_provider_legacy_mlx_flag(monkeypatch) -> None:
+    monkeypatch.delenv("OVS_SUMMARIZER_PROVIDER", raising=False)
+    monkeypatch.setenv("OVS_ENABLE_MLX_SUMMARIZER", "true")
+    settings = Settings()
+    assert settings.summarizer_provider == "mlx"
+
+
+def test_provider_defaults_to_fallback(monkeypatch) -> None:
+    monkeypatch.delenv("OVS_SUMMARIZER_PROVIDER", raising=False)
+    monkeypatch.delenv("OVS_ENABLE_MLX_SUMMARIZER", raising=False)
+    settings = Settings()
+    assert settings.summarizer_provider == "fallback"
+
+
+def test_provider_invalid_raises(monkeypatch) -> None:
+    monkeypatch.setenv("OVS_SUMMARIZER_PROVIDER", "invalid")
+    import pytest
+    with pytest.raises(ValueError, match="must be fallback, mlx, or omlx"):
+        Settings()
+
+
+def test_omlx_missing_base_url_raises(monkeypatch) -> None:
+    monkeypatch.setenv("OVS_SUMMARIZER_PROVIDER", "omlx")
+    monkeypatch.delenv("OVS_OMLX_BASE_URL", raising=False)
+    monkeypatch.setenv("OVS_OMLX_MODEL", "test-model")
+    import pytest
+    with pytest.raises(ValueError, match="OVS_OMLX_BASE_URL is required"):
+        Settings()
+
+
+def test_omlx_missing_model_raises(monkeypatch) -> None:
+    monkeypatch.setenv("OVS_SUMMARIZER_PROVIDER", "omlx")
+    monkeypatch.setenv("OVS_OMLX_BASE_URL", "http://localhost:8080/v1")
+    monkeypatch.delenv("OVS_OMLX_MODEL", raising=False)
+    import pytest
+    with pytest.raises(ValueError, match="OVS_OMLX_MODEL is required"):
+        Settings()
+
+
+def test_omlx_base_url_trailing_slash_stripped(monkeypatch) -> None:
+    monkeypatch.setenv("OVS_SUMMARIZER_PROVIDER", "omlx")
+    monkeypatch.setenv("OVS_OMLX_BASE_URL", "http://localhost:8080/v1/")
+    monkeypatch.setenv("OVS_OMLX_MODEL", "test-model")
+    settings = Settings()
+    assert settings.omlx_base_url == "http://localhost:8080/v1"
+
+
+def test_omlx_timeout_parsing(monkeypatch) -> None:
+    monkeypatch.setenv("OVS_SUMMARIZER_PROVIDER", "omlx")
+    monkeypatch.setenv("OVS_OMLX_BASE_URL", "http://localhost:8080/v1")
+    monkeypatch.setenv("OVS_OMLX_MODEL", "test-model")
+    monkeypatch.setenv("OVS_OMLX_TIMEOUT_SECONDS", "60")
+    settings = Settings()
+    assert settings.omlx_timeout_seconds == 60
+
+
+def test_omlx_timeout_default(monkeypatch) -> None:
+    monkeypatch.setenv("OVS_SUMMARIZER_PROVIDER", "omlx")
+    monkeypatch.setenv("OVS_OMLX_BASE_URL", "http://localhost:8080/v1")
+    monkeypatch.setenv("OVS_OMLX_MODEL", "test-model")
+    monkeypatch.delenv("OVS_OMLX_TIMEOUT_SECONDS", raising=False)
+    settings = Settings()
+    assert settings.omlx_timeout_seconds == 180
+
+
 def test_find_subtitles_for_family_returns_existing_english_first(tmp_path: Path) -> None:
     client = YtDlpVideoSourceClient(StorageService(tmp_path), [])
     job_dir = tmp_path / "job-1"

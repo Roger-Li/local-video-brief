@@ -21,7 +21,7 @@ from backend.app.services.chaptering import HeuristicChapterer
 from backend.app.services.pipeline import VideoSummaryPipeline
 from backend.app.services.queue import JobQueueService
 from backend.app.services.storage import StorageService
-from backend.app.services.summarizer import MlxQwenSummaryGenerator
+from backend.app.services.summarizer import create_summary_generator
 from backend.app.services.transcript import VttTranscriptProvider
 from backend.app.services.video_source import YtDlpVideoSourceClient
 
@@ -38,7 +38,7 @@ async def lifespan(app: FastAPI):
     transcript_provider = VttTranscriptProvider()
     asr_service = MlxWhisperAsrService(settings)
     chapterer = HeuristicChapterer(settings)
-    summary_generator = MlxQwenSummaryGenerator(settings)
+    summary_generator = create_summary_generator(settings)
     pipeline = VideoSummaryPipeline(
         repository=repository,
         video_source=video_source,
