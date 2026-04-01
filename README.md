@@ -88,22 +88,40 @@ OVS_TEST_ENABLE_MLX_SUMMARIZER=true \
 
 1. Submit a URL through the frontend or `POST /jobs`.
 2. The backend inspects the provider with `yt-dlp`.
-3. Caption retrieval is attempted one language at a time.
-4. Caption priority is English first, then Chinese, then other languages.
-5. As soon as captions from the highest-priority available language family are found, the backend stops requesting more subtitle languages.
-6. If no usable captions are found, the pipeline downloads audio and runs `mlx-whisper`.
-7. Results are stored in SQLite plus local artifact directories.
+3. Caption retrieval is attempted one language at a time (English first, then Chinese, then others).
+4. If no usable captions are found, the pipeline downloads audio and runs `mlx-whisper`.
+5. Transcript normalization deduplicates rolling captions, strips markup, and merges short fragments.
+6. Chaptering splits by gaps/duration, with a density-aware second pass for dense single-chapter transcripts.
+7. The MLX summarizer generates bilingual chapter summaries and an overall summary.
+8. Results, transcripts, and debug artifacts are stored in SQLite plus local artifact directories.
 
 ## Smoke Test Outputs
 
 - Successful end-to-end summaries from `scripts/test_video_job.sh` are written to `artifacts/test-runs/<job-id>-result.json`.
-- Per-job downloaded media and subtitle artifacts are written to `artifacts/<job-id>/`.
-- The isolated backend log used by the smoke test is written to `artifacts/test-runs/backend-8010.log`.
+- Per-job artifacts are written to `artifacts/<job-id>/`:
+  - `transcript_raw.json` and `transcript_normalized.json` (before/after normalization)
+  - `summarizer_prompt.txt` and `summarizer_raw_output.txt` (LLM debugging)
+  - `source.*.vtt` (downloaded subtitle files)
+- The isolated backend log is written to `artifacts/test-runs/backend-8010.log`.
+
+## Configuration
+
+| Variable | Default | Description |
+|---|---|---|
+| `OVS_ENABLE_MLX_ASR` | `false` | Enable local Whisper ASR for captionless videos |
+| `OVS_ENABLE_MLX_SUMMARIZER` | `false` | Enable MLX LLM summarization (requires `mlx-lm`) |
+| `OVS_ENABLE_TRANSCRIPT_NORMALIZATION` | `true` | Enable transcript dedup/cleanup before chaptering |
+| `OVS_SUMMARIZER_MODEL` | `Qwen3.5-9B-Instruct-4bit` | MLX model repo for summarization |
+| `OVS_ASR_MODEL` | `large-v3-turbo` | Whisper model (alias or full MLX repo id) |
+| `OVS_MAX_CHAPTER_MINUTES` | `8` | Max chapter duration before forced split |
+| `OVS_SUMMARIZER_MAX_TOKENS` | `2048` | Base max tokens for LLM generation |
 
 ## Known Limitations
 
 - The fallback summarizer is intentionally simple and mainly exists to validate the pipeline without requiring `mlx-lm`.
-- Caption availability and rate limits are source-dependent; the pipeline now tolerates partial subtitle-language failures, but providers can still block requests entirely.
+- Caption availability and rate limits are source-dependent; the pipeline tolerates partial subtitle-language failures, but providers can still block requests entirely.
+- Transcript normalization handles most rolling-caption patterns but may leave residual duplication in edge cases.
+- The summarizer worker processes jobs sequentially; concurrent submissions queue up.
 
 ## Notes
 
