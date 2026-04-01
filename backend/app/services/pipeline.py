@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+import json
 import logging
 import time
+from pathlib import Path
 
+from backend.app.core.config import Settings
 from backend.app.models.job import JobStatus
 
 logger = logging.getLogger(__name__)
@@ -10,6 +13,7 @@ from backend.app.repositories.job_repository import JobRepository
 from backend.app.services.asr import MlxWhisperAsrService
 from backend.app.services.chaptering import HeuristicChapterer
 from backend.app.services.interfaces import SummaryGenerator, TranscriptProvider, VideoSourceClient
+from backend.app.services.normalizer import TranscriptNormalizer
 from backend.app.utils.text import detect_language
 
 
@@ -22,6 +26,7 @@ class VideoSummaryPipeline:
         asr_service: MlxWhisperAsrService,
         chapterer: HeuristicChapterer,
         summary_generator: SummaryGenerator,
+        settings: Settings | None = None,
     ) -> None:
         self.repository = repository
         self.video_source = video_source
@@ -29,6 +34,8 @@ class VideoSummaryPipeline:
         self.asr_service = asr_service
         self.chapterer = chapterer
         self.summary_generator = summary_generator
+        self._settings = settings or Settings()
+        self._normalizer = TranscriptNormalizer()
 
     def process_job(self, job_id: str) -> None:
         job = self.repository.get_job(job_id)
@@ -91,10 +98,55 @@ class VideoSummaryPipeline:
             self.repository.update_job(job_id, progress_stage="normalizing_transcript")
             detected_language = self._detect_language(transcript_segments)
             logger.info("detected_language=%s total_segments=%d", detected_language, len(transcript_segments))
+
+            raw_segments = transcript_segments
+            if self._settings.enable_transcript_normalization:
+                logger.info("stage=normalizing_transcript job=%s raw_segments=%d", job_id, len(raw_segments))
+                t0 = time.perf_counter()
+                transcript_segments, norm_stats = self._normalizer.normalize(raw_segments)
+                logger.info(
+                    "stage=normalizing_transcript DONE job=%s normalized=%d deduped=%d markup=%d fallback=%s (%.1fs)",
+                    job_id, norm_stats.normalized_segment_count,
+                    norm_stats.merged_or_deduped_count, norm_stats.cleaned_markup_count,
+                    norm_stats.normalization_fallback_used, time.perf_counter() - t0,
+                )
+            else:
+                from backend.app.services.normalizer import NormalizationStats
+                norm_stats = NormalizationStats(
+                    raw_segment_count=len(raw_segments),
+                    normalized_segment_count=len(raw_segments),
+                    normalization_applied=False,
+                    source_mode=self._detect_source_mode(raw_segments),
+                )
+
+            # Persist raw and normalized transcript artifacts.
+            latest_job = self.repository.get_job(job_id)
+            current_artifacts = latest_job.artifacts if latest_job else {}
+            artifact_root = self._settings.artifact_root / job_id
+            artifact_root.mkdir(parents=True, exist_ok=True)
+            raw_path = artifact_root / "transcript_raw.json"
+            norm_path = artifact_root / "transcript_normalized.json"
+            raw_path.write_text(json.dumps(raw_segments, ensure_ascii=False), encoding="utf-8")
+            norm_path.write_text(json.dumps(transcript_segments, ensure_ascii=False), encoding="utf-8")
+            current_artifacts["transcript_raw_path"] = str(raw_path)
+            current_artifacts["transcript_normalized_path"] = str(norm_path)
+
+            transcript_stats = {
+                "raw_segment_count": norm_stats.raw_segment_count,
+                "normalized_segment_count": norm_stats.normalized_segment_count,
+                "cleaned_markup_count": norm_stats.cleaned_markup_count,
+                "merged_or_deduped_count": norm_stats.merged_or_deduped_count,
+                "normalization_applied": norm_stats.normalization_applied,
+                "normalization_fallback_used": norm_stats.normalization_fallback_used,
+                "source_mode": norm_stats.source_mode,
+            }
+            current_artifacts["transcript_stats"] = transcript_stats
+
             self.repository.update_job(
                 job_id,
                 transcript_segments=transcript_segments,
                 detected_language=detected_language,
+                artifacts=current_artifacts,
                 progress_stage="chaptering",
             )
 
@@ -107,11 +159,13 @@ class VideoSummaryPipeline:
             t0 = time.perf_counter()
             latest = self.repository.get_job(job_id)
             source_metadata = latest.source_metadata if latest else {}
+            summary_artifact_dir = self._settings.artifact_root / job_id
             summary_payload = self.summary_generator.summarize(
                 source_metadata=source_metadata or {},
                 transcript_segments=transcript_segments,
                 chapters=chapters,
                 output_languages=job.output_languages,
+                artifact_dir=summary_artifact_dir,
             )
             logger.info("stage=summarizing DONE job=%s (%.1fs)", job_id, time.perf_counter() - t0)
             self.repository.update_job(
@@ -137,3 +191,12 @@ class VideoSummaryPipeline:
     def _detect_language(self, transcript_segments: list[dict]) -> str:
         combined = " ".join(segment["text"] for segment in transcript_segments[:50])
         return detect_language(combined)
+
+    @staticmethod
+    def _detect_source_mode(segments: list[dict]) -> str:
+        sources = {seg.get("source", "captions") for seg in segments}
+        if sources == {"captions"}:
+            return "captions"
+        if sources == {"asr"}:
+            return "asr"
+        return "mixed"

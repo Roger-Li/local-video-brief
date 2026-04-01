@@ -51,6 +51,16 @@ class JobStatusResponse(BaseModel):
     updated_at: str
 
 
+class TranscriptStats(BaseModel):
+    raw_segment_count: int = 0
+    normalized_segment_count: int = 0
+    cleaned_markup_count: int = 0
+    merged_or_deduped_count: int = 0
+    normalization_applied: bool = True
+    normalization_fallback_used: bool = False
+    source_mode: str = "captions"
+
+
 class JobResultResponse(BaseModel):
     job_id: str
     status: str
@@ -59,3 +69,4 @@ class JobResultResponse(BaseModel):
     chapters: List[ChapterSummary]
     overall_summary: OverallSummary
     artifacts: Dict[str, Any]
+    transcript_stats: Optional[TranscriptStats] = None

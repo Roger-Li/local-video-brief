@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Protocol
+from typing import Optional, Protocol
 from typing import Any, Dict, List
 
 
@@ -52,4 +52,5 @@ class SummaryGenerator(Protocol):
         transcript_segments: List[Dict[str, Any]],
         chapters: List[Dict[str, Any]],
         output_languages: List[str],
+        artifact_dir: Optional[Path] = None,
     ) -> Dict[str, Any]: ...

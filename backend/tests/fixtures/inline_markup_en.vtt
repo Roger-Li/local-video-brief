@@ -1,0 +1,23 @@
+WEBVTT
+
+00:00:00.000 --> 00:00:05.000
+<v Speaker1>Hello and <c.highlight>welcome</c.highlight> to this presentation</v>
+
+00:00:05.000 --> 00:00:10.000
+<00:00:05.500><c> We</c><00:00:06.000><c> will</c><00:00:06.500><c> cover</c><00:00:07.000><c> three topics</c>
+
+00:00:10.000 --> 00:00:12.000
+[Music]
+
+00:00:12.000 --> 00:00:18.000
+First topic is about data processing [inaudible] and cleaning
+
+00:00:18.000 --> 00:00:22.000
+[Applause]
+
+00:00:22.000 --> 00:00:28.000
+Second topic covers <i>model training</i> and evaluation
+
+00:00:28.000 --> 00:00:35.000
+Third topic is deployment [laughter] in production environments
+

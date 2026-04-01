@@ -81,6 +81,9 @@ class Settings:
     )
     asr_model: str = field(default_factory=lambda: os.getenv("OVS_ASR_MODEL", "large-v3-turbo"))
     max_chapter_minutes: int = field(default_factory=lambda: int(os.getenv("OVS_MAX_CHAPTER_MINUTES", "8")))
+    enable_transcript_normalization: bool = field(
+        default_factory=lambda: os.getenv("OVS_ENABLE_TRANSCRIPT_NORMALIZATION", "true").lower() == "true"
+    )
 
     def __post_init__(self) -> None:
         object.__setattr__(

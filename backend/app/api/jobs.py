@@ -2,7 +2,13 @@ from __future__ import annotations
 
 from fastapi import APIRouter, HTTPException, Request, status
 
-from backend.app.schemas.jobs import CreateJobRequest, CreateJobResponse, JobResultResponse, JobStatusResponse
+from backend.app.schemas.jobs import (
+    CreateJobRequest,
+    CreateJobResponse,
+    JobResultResponse,
+    JobStatusResponse,
+    TranscriptStats,
+)
 
 router = APIRouter(prefix="/jobs", tags=["jobs"])
 
@@ -45,6 +51,9 @@ def get_job_result(job_id: str, request: Request) -> JobResultResponse:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Job not found")
     if job.status != "completed" or not job.result_payload:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Job result is not ready")
+    raw_stats = (job.artifacts or {}).get("transcript_stats")
+    transcript_stats = TranscriptStats(**raw_stats) if raw_stats else None
+
     return JobResultResponse(
         job_id=job.id,
         status=job.status,
@@ -56,5 +65,6 @@ def get_job_result(job_id: str, request: Request) -> JobResultResponse:
             {"summary_en": "", "summary_zh": "", "highlights": []},
         ),
         artifacts=job.artifacts,
+        transcript_stats=transcript_stats,
     )
 
