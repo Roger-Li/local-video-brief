@@ -11,6 +11,17 @@ SERVER_LOG="${LOG_DIR}/backend-${PORT}.log"
 ENABLE_SUMMARIZER="${OVS_TEST_ENABLE_MLX_SUMMARIZER:-false}"
 PYTHON="${OVS_TEST_PYTHON:-${ROOT_DIR}/.venv/bin/python}"
 
+# Provider resolution: explicit OVS_TEST_SUMMARIZER_PROVIDER wins,
+# then legacy OVS_TEST_ENABLE_MLX_SUMMARIZER=true maps to mlx,
+# else fallback.
+if [[ -n "${OVS_TEST_SUMMARIZER_PROVIDER:-}" ]]; then
+  SUMMARIZER_PROVIDER="${OVS_TEST_SUMMARIZER_PROVIDER}"
+elif [[ "${ENABLE_SUMMARIZER}" == "true" ]]; then
+  SUMMARIZER_PROVIDER="mlx"
+else
+  SUMMARIZER_PROVIDER="fallback"
+fi
+
 mkdir -p "${LOG_DIR}"
 
 cleanup() {
@@ -40,19 +51,31 @@ if ! command -v yt-dlp >/dev/null 2>&1; then
 fi
 
 echo "Verifying project runtime..."
-OVS_ENABLE_MLX_ASR=true OVS_ENABLE_MLX_SUMMARIZER="${ENABLE_SUMMARIZER}" "${PYTHON}" - <<'PY'
+echo "summarizer_provider=${SUMMARIZER_PROVIDER}"
+if [[ "${SUMMARIZER_PROVIDER}" == "omlx" ]]; then
+  echo "omlx_base_url=${OVS_OMLX_BASE_URL:-(not set)}"
+  echo "omlx_model=${OVS_OMLX_MODEL:-(not set)}"
+  echo "omlx_api_key=${OVS_OMLX_API_KEY:+set}"
+fi
+OVS_ENABLE_MLX_ASR=true \
+OVS_SUMMARIZER_PROVIDER="${SUMMARIZER_PROVIDER}" \
+OVS_ENABLE_MLX_SUMMARIZER="${ENABLE_SUMMARIZER}" \
+"${PYTHON}" - <<'PY'
 import importlib.util
 from backend.app.core.config import get_settings
 
 settings = get_settings()
+print(f"summarizer_provider={settings.summarizer_provider}")
 print(f"enable_mlx_asr={settings.enable_mlx_asr}")
 print(f"enable_mlx_summarizer={settings.enable_mlx_summarizer}")
 print(f"mlx_whisper_installed={importlib.util.find_spec('mlx_whisper') is not None}")
 print(f"mlx_lm_installed={importlib.util.find_spec('mlx_lm') is not None}")
+print(f"httpx_installed={importlib.util.find_spec('httpx') is not None}")
 PY
 
 echo "Starting isolated backend on ${BASE_URL}..."
 OVS_ENABLE_MLX_ASR=true \
+OVS_SUMMARIZER_PROVIDER="${SUMMARIZER_PROVIDER}" \
 OVS_ENABLE_MLX_SUMMARIZER="${ENABLE_SUMMARIZER}" \
 "${PYTHON}" -m uvicorn backend.app.main:app --host "${HOST}" --port "${PORT}" >"${SERVER_LOG}" 2>&1 &
 SERVER_PID=$!

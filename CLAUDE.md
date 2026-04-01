@@ -20,7 +20,7 @@ This repository builds a local-first video summary tool for Apple Silicon Macs. 
 | Transcript provider | `services/transcript.py` | VTT parsing, tag stripping, segment extraction |
 | Normalizer | `services/normalizer.py` | Rolling-caption dedup, markup cleanup, short-fragment merge |
 | Chaptering | `services/chaptering.py` | Gap/duration-based splitting + density-aware repartitioning |
-| Summarizer | `services/summarizer.py` | MLX LLM summarization with rule-based fallback |
+| Summarizer | `services/summarizer.py` | MLX / oMLX / rule-based summarization |
 | Pipeline | `services/pipeline.py` | Orchestrates all stages, persists artifacts |
 
 ## Working Assumptions
@@ -29,7 +29,9 @@ This repository builds a local-first video summary tool for Apple Silicon Macs. 
 - Successful smoke-test runs should work without the frontend.
 - For real provider tests, prefer `scripts/test_video_job.sh` over ad hoc curl sequences because it forces the required ASR flags and captures logs and outputs.
 - `OVS_ENABLE_MLX_ASR=true` is required for videos without usable captions.
-- `OVS_ENABLE_MLX_SUMMARIZER=true` is required for real summaries; the fallback summarizer extracts transcript sentences only.
+- `OVS_SUMMARIZER_PROVIDER` selects the summarizer: `fallback` (rule-based), `mlx` (in-process mlx-lm), or `omlx` (remote oMLX server). If unset, falls back to `mlx` when `OVS_ENABLE_MLX_SUMMARIZER=true`, else `fallback`.
+- `OVS_ENABLE_MLX_SUMMARIZER=true` is a legacy shorthand for `OVS_SUMMARIZER_PROVIDER=mlx`; the fallback summarizer extracts transcript sentences only.
+- When `provider=omlx`, `OVS_OMLX_BASE_URL` and `OVS_OMLX_MODEL` are required. Optional: `OVS_OMLX_API_KEY`, `OVS_OMLX_TIMEOUT_SECONDS` (default 180).
 - `OVS_ENABLE_TRANSCRIPT_NORMALIZATION=true` (default) runs dedup/cleanup; set to `false` to bypass.
 - The smoke-test script accepts `OVS_TEST_PYTHON` to override the Python interpreter (e.g., `OVS_TEST_PYTHON=$HOME/ml-env/bin/python`).
 
@@ -61,6 +63,7 @@ This repository builds a local-first video summary tool for Apple Silicon Macs. 
 ./scripts/test_video_job.sh
 ./scripts/test_video_job.sh "https://www.youtube.com/watch?v=Lk_OQufs1HQ"
 OVS_TEST_ENABLE_MLX_SUMMARIZER=true ./scripts/test_video_job.sh "https://youtu.be/j190mwiVlwA"
+OVS_TEST_SUMMARIZER_PROVIDER=omlx OVS_OMLX_BASE_URL=http://localhost:8080/v1 OVS_OMLX_MODEL=<model> ./scripts/test_video_job.sh
 ```
 
 - Successful smoke-test outputs are written to `artifacts/test-runs/<job-id>-result.json`.
@@ -68,12 +71,17 @@ OVS_TEST_ENABLE_MLX_SUMMARIZER=true ./scripts/test_video_job.sh "https://youtu.b
 
 ## Summarizer Notes
 
+- Three providers behind the `SummaryGenerator` protocol: `RuleBasedSummaryGenerator`, `MlxQwenSummaryGenerator`, `OmlxSummaryGenerator`.
+- `create_summary_generator(settings)` factory in `summarizer.py` selects the provider; called from `main.py` at startup.
+- Shared module-level helpers: `build_summarizer_prompt()`, `extract_json()`, `compute_max_tokens()`.
 - The MLX summarizer uses chat template formatting via `tokenizer.apply_chat_template(enable_thinking=False)` to suppress Qwen3.5 thinking mode.
+- The oMLX summarizer sends structured `system`/`user` messages to `{base_url}/chat/completions` (OpenAI-compatible); the server handles chat templating.
 - The prompt includes an explicit JSON schema example for the expected output structure.
-- `_extract_json()` uses `json.JSONDecoder().raw_decode()` to handle trailing characters, and strips `<think>` blocks as a safety net.
+- `extract_json()` uses `json.JSONDecoder().raw_decode()` to handle trailing characters, and strips `<think>` blocks as a safety net.
 - `max_tokens` is dynamic: `max(OVS_SUMMARIZER_MAX_TOKENS, 1024 * chapters + 1024)`.
 - Only essential metadata fields (title, description, duration, upload_date, channel, tags) are passed to the prompt.
-- Both the prompt and raw LLM output are saved as artifacts (`summarizer_prompt.txt`, `summarizer_raw_output.txt`) for debugging.
+- Artifacts saved per job: `summarizer_prompt.txt`, `summarizer_raw_output.txt`, and (oMLX only) `summarizer_request.json` with request body only.
+- All providers fall back to rule-based output on failure. oMLX runtime failures (timeout, HTTP errors, bad JSON) trigger fallback; config errors (missing URL/model) fail at startup.
 - The rule-based fallback caps summaries at 500 chars to prevent transcript dumps when text lacks sentence punctuation.
 
 ## Known Limitations
@@ -92,6 +100,6 @@ OVS_TEST_ENABLE_MLX_SUMMARIZER=true ./scripts/test_video_job.sh "https://youtu.b
 
 ## Future Directions
 
-- **oMLX server for model hosting**: Replace in-process `mlx-lm` loading with a local oMLX server (`/v1/chat/completions`) for consolidated model management, shared GPU memory across requests, and decoupled model config. This also enables swapping models without restarting the backend.
+- **oMLX server for model hosting**: The `omlx` summarizer provider is implemented (v1, OpenAI-compatible, non-streaming). Future work: streaming support, retry-once for transient errors, and Anthropic-compatible endpoint support if needed.
 - **Browser-integrated summarization**: Build a browser extension (Chrome/Firefox WebExtension API) that detects YouTube/bilibili video pages, triggers summary jobs against the local backend, and displays results in a sidebar overlay. This requires the backend to be running locally and the extension to communicate via `localhost` API. A Safari Web Extension variant would need a native app wrapper. Alternatively, a Tauri or Electron desktop app with an embedded webview could wrap the existing React frontend and add system-tray quick-access.
 - **ASR server migration**: If ASR moves to a server, `mlx-audio` (with `/v1/audio/transcriptions`) is the better fit over oMLX, since oMLX does not expose audio transcription endpoints.

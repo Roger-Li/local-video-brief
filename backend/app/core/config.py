@@ -51,6 +51,17 @@ def _csv_env(name: str, default: List[str]) -> List[str]:
     return [item.strip() for item in raw_value.split(",") if item.strip()]
 
 
+def _resolve_summarizer_provider() -> str:
+    explicit = os.getenv("OVS_SUMMARIZER_PROVIDER", "").strip().lower()
+    if explicit:
+        if explicit not in ("fallback", "mlx", "omlx"):
+            raise ValueError(f"OVS_SUMMARIZER_PROVIDER must be fallback, mlx, or omlx (got '{explicit}')")
+        return explicit
+    if os.getenv("OVS_ENABLE_MLX_SUMMARIZER", "false").lower() == "true":
+        return "mlx"
+    return "fallback"
+
+
 @dataclass(frozen=True)
 class Settings:
     app_name: str = field(default_factory=lambda: os.getenv("OVS_APP_NAME", "Local Video Brief"))
@@ -61,6 +72,7 @@ class Settings:
     worker_poll_interval: int = field(default_factory=lambda: int(os.getenv("OVS_WORKER_POLL_INTERVAL", "2")))
     default_output_languages: List[str] = field(default_factory=list)
     preferred_caption_languages: List[str] = field(default_factory=list)
+    summarizer_provider: str = field(default_factory=_resolve_summarizer_provider)
     summarizer_model: str = field(
         default_factory=lambda: os.getenv(
             "OVS_SUMMARIZER_MODEL",
@@ -84,6 +96,12 @@ class Settings:
     enable_transcript_normalization: bool = field(
         default_factory=lambda: os.getenv("OVS_ENABLE_TRANSCRIPT_NORMALIZATION", "true").lower() == "true"
     )
+    omlx_base_url: str = field(default_factory=lambda: os.getenv("OVS_OMLX_BASE_URL", "").rstrip("/"))
+    omlx_model: str = field(default_factory=lambda: os.getenv("OVS_OMLX_MODEL", ""))
+    omlx_api_key: str = field(default_factory=lambda: os.getenv("OVS_OMLX_API_KEY", ""))
+    omlx_timeout_seconds: int = field(
+        default_factory=lambda: int(os.getenv("OVS_OMLX_TIMEOUT_SECONDS", "180"))
+    )
 
     def __post_init__(self) -> None:
         object.__setattr__(
@@ -96,6 +114,11 @@ class Settings:
             "preferred_caption_languages",
             _csv_env("OVS_PREFERRED_CAPTION_LANGUAGES", ["en", "zh-Hans", "zh-Hant", "zh-CN", "zh-TW"]),
         )
+        if self.summarizer_provider == "omlx":
+            if not self.omlx_base_url:
+                raise ValueError("OVS_OMLX_BASE_URL is required when OVS_SUMMARIZER_PROVIDER=omlx")
+            if not self.omlx_model:
+                raise ValueError("OVS_OMLX_MODEL is required when OVS_SUMMARIZER_PROVIDER=omlx")
 
 
 @lru_cache(maxsize=1)

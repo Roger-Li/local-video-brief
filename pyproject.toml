@@ -20,6 +20,9 @@ mlx = [
   "mlx-lm>=0.22.0",
   "mlx-whisper>=0.4.0",
 ]
+omlx = [
+  "httpx>=0.28.0",
+]
 
 [tool.pytest.ini_options]
 testpaths = ["backend/tests"]
