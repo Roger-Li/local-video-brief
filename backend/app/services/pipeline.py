@@ -169,6 +169,46 @@ class VideoSummaryPipeline:
                 progress_callback=lambda stage: self.repository.update_job(job_id, progress_stage=stage),
             )
             logger.info("stage=summarizing DONE job=%s (%.1fs)", job_id, time.perf_counter() - t0)
+
+            # Study pack generation (optional, non-fatal).
+            if self._settings.enable_study_pack:
+                self.repository.update_job(job_id, progress_stage="generating_study_pack")
+                logger.info("stage=generating_study_pack job=%s", job_id)
+                t0 = time.perf_counter()
+                try:
+                    from backend.app.services.study_pack import StudyPackGenerator, render_study_guide_markdown
+                    sp_gen = StudyPackGenerator(self._settings)
+                    study_pack_data = sp_gen.generate(
+                        source_metadata=source_metadata or {},
+                        chapters=chapters,
+                        chapter_summaries=summary_payload.get("chapters", []),
+                        overall_summary=summary_payload.get("overall_summary", {}),
+                        artifact_dir=summary_artifact_dir,
+                    )
+                    if study_pack_data is not None:
+                        sp_path = artifact_root / "study_pack.json"
+                        sp_path.write_text(
+                            json.dumps(study_pack_data, ensure_ascii=False, indent=2),
+                            encoding="utf-8",
+                        )
+                        md_content = render_study_guide_markdown(
+                            study_pack_data, source_metadata or {},
+                        )
+                        md_path = artifact_root / "study_guide.md"
+                        md_path.write_text(md_content, encoding="utf-8")
+                        latest_job = self.repository.get_job(job_id)
+                        current_artifacts = latest_job.artifacts if latest_job else {}
+                        current_artifacts["study_pack_path"] = str(sp_path)
+                        current_artifacts["study_guide_path"] = str(md_path)
+                        self.repository.update_job(job_id, artifacts=current_artifacts)
+                        summary_payload["study_pack"] = study_pack_data
+                    logger.info(
+                        "stage=generating_study_pack DONE job=%s (%.1fs)",
+                        job_id, time.perf_counter() - t0,
+                    )
+                except Exception as exc:
+                    logger.warning("study_pack generation failed (non-fatal): %s", exc)
+
             self.repository.update_job(
                 job_id,
                 status=JobStatus.COMPLETED,

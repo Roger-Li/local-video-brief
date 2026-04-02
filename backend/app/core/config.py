@@ -102,6 +102,9 @@ class Settings:
     omlx_timeout_seconds: int = field(
         default_factory=lambda: int(os.getenv("OVS_OMLX_TIMEOUT_SECONDS", "180"))
     )
+    enable_study_pack: bool = field(
+        default_factory=lambda: os.getenv("OVS_ENABLE_STUDY_PACK", "false").lower() == "true"
+    )
 
     def __post_init__(self) -> None:
         object.__setattr__(

@@ -96,7 +96,7 @@ def extract_json(raw: str) -> str:
     start = cleaned.find("{")
     if start != -1:
         try:
-            decoder = json.JSONDecoder()
+            decoder = json.JSONDecoder(strict=False)
             _, end_idx = decoder.raw_decode(cleaned, start)
             cleaned = cleaned[start:end_idx]
         except json.JSONDecodeError:
