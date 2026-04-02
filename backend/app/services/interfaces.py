@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional, Protocol
+from typing import Callable, Optional, Protocol
 from typing import Any, Dict, List
 
 
@@ -53,4 +53,5 @@ class SummaryGenerator(Protocol):
         chapters: List[Dict[str, Any]],
         output_languages: List[str],
         artifact_dir: Optional[Path] = None,
+        progress_callback: Optional[Callable[[str], None]] = None,
     ) -> Dict[str, Any]: ...

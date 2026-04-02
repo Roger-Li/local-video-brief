@@ -26,6 +26,36 @@ def split_sentences(text: str, limit: int = 2) -> list[str]:
     return [part.strip() for part in parts if part.strip()][:limit]
 
 
+def chunk_segments(segments: list[dict], max_chars: int) -> list[list[dict]]:
+    """Group transcript segments into chunks respecting segment boundaries.
+
+    Each chunk is a list of consecutive segments whose total text length
+    does not exceed max_chars. Never splits mid-segment.
+    If a single segment exceeds max_chars, it becomes its own chunk.
+    """
+    if not segments:
+        return []
+    chunks: list[list[dict]] = []
+    current: list[dict] = []
+    current_len = 0
+    for seg in segments:
+        seg_len = len(seg.get("text", ""))
+        if current and current_len + seg_len > max_chars:
+            chunks.append(current)
+            current = []
+            current_len = 0
+        current.append(seg)
+        current_len += seg_len
+    if current:
+        chunks.append(current)
+    return chunks
+
+
+def segments_to_text(segments: list[dict]) -> str:
+    """Join segment texts with spaces."""
+    return " ".join(seg.get("text", "") for seg in segments)
+
+
 def chunk_text(text: str, max_chars: int) -> list[str]:
     normalized = re.sub(r"\s+", " ", text).strip()
     if not normalized:

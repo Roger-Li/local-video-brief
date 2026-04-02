@@ -166,6 +166,7 @@ class VideoSummaryPipeline:
                 chapters=chapters,
                 output_languages=job.output_languages,
                 artifact_dir=summary_artifact_dir,
+                progress_callback=lambda stage: self.repository.update_job(job_id, progress_stage=stage),
             )
             logger.info("stage=summarizing DONE job=%s (%.1fs)", job_id, time.perf_counter() - t0)
             self.repository.update_job(

@@ -5,10 +5,10 @@ import logging
 import re
 import time
 from pathlib import Path
-from typing import Optional
+from typing import Callable, Optional
 
 from backend.app.core.config import Settings
-from backend.app.utils.text import chunk_text, split_sentences
+from backend.app.utils.text import chunk_segments, chunk_text, segments_to_text, split_sentences
 
 logger = logging.getLogger(__name__)
 
@@ -115,6 +115,74 @@ def compute_max_tokens(settings: Settings, chapter_count: int) -> int:
 
 
 # ---------------------------------------------------------------------------
+# Hierarchical summarization prompts
+# ---------------------------------------------------------------------------
+
+_CHUNK_NOTE_SYSTEM = (
+    "You are a note-taking assistant. "
+    "Summarize the following transcript excerpt in 3-5 sentences of plain English. "
+    "Focus on the main ideas, arguments, and facts presented. "
+    "Do NOT output JSON. Output plain text only."
+)
+
+
+def _build_chunk_note_user(chunk_text: str, chapter_title: str,
+                           chunk_index: int, total_chunks: int) -> str:
+    return (
+        f"Chapter: {chapter_title}\n"
+        f"Chunk {chunk_index + 1} of {total_chunks}:\n\n"
+        f"{chunk_text}"
+    )
+
+
+_CHAPTER_SYNTHESIS_SYSTEM = (
+    "You are a multilingual video summarization model.\n"
+    "Given notes from a single chapter, produce a JSON object with these fields:\n"
+    '  "start_s": <float>, "end_s": <float>, "title": "<short title>",\n'
+    '  "summary_en": "<2-4 sentence English summary>",\n'
+    '  "summary_zh": "<2-4 sentence Chinese summary>",\n'
+    '  "key_points": ["point 1", "point 2", ...]\n'
+    "Output ONLY the JSON object. No explanation, no markdown fences."
+)
+
+
+def _build_chapter_synthesis_user(chapter: dict, chunk_notes: list[str]) -> str:
+    notes_block = "\n\n".join(f"[Note {i+1}] {note}" for i, note in enumerate(chunk_notes))
+    return (
+        f"Chapter title: {chapter.get('title_hint', 'Untitled')}\n"
+        f"Time range: {chapter['start_s']:.1f}s - {chapter['end_s']:.1f}s\n\n"
+        f"Notes:\n{notes_block}"
+    )
+
+
+_OVERALL_SYNTHESIS_SYSTEM = (
+    "You are a multilingual video summarization model.\n"
+    "Given chapter summaries, produce a JSON object with these fields:\n"
+    '  "summary_en": "<3-5 sentence English summary of the entire video>",\n'
+    '  "summary_zh": "<3-5 sentence Chinese summary of the entire video>",\n'
+    '  "highlights": ["highlight 1", "highlight 2", "highlight 3"]\n'
+    "Output ONLY the JSON object. No explanation, no markdown fences."
+)
+
+
+def _build_overall_synthesis_user(source_metadata: dict,
+                                  chapter_summaries: list[dict]) -> str:
+    brief_metadata = {
+        k: source_metadata[k]
+        for k in ("title", "description", "duration", "upload_date", "channel", "tags")
+        if k in source_metadata
+    }
+    chapters_block = "\n".join(
+        f"[Ch {i+1}] {ch.get('title', 'Untitled')}: {ch.get('summary_en', '')}"
+        for i, ch in enumerate(chapter_summaries)
+    )
+    return (
+        f"Metadata: {json.dumps(brief_metadata, ensure_ascii=False)}\n\n"
+        f"Chapter summaries:\n{chapters_block}"
+    )
+
+
+# ---------------------------------------------------------------------------
 # MLX in-process summarizer
 # ---------------------------------------------------------------------------
 
@@ -124,6 +192,72 @@ class MlxQwenSummaryGenerator:
         self._model = None
         self._tokenizer = None
 
+    def _call_llm(
+        self,
+        system_msg: str,
+        user_msg: str,
+        max_tokens: int,
+        artifact_dir: Path | None = None,
+        artifact_label: str = "",
+    ) -> str:
+        """Apply chat template, call mlx_lm.generate, save artifacts, return raw text."""
+        self._ensure_model_loaded()
+        prompt = self._apply_chat_template(system_msg, user_msg)
+        label = f"_{artifact_label}" if artifact_label else ""
+        logger.info("mlx prompt%s built: %d chars", label, len(prompt))
+
+        if artifact_dir:
+            artifact_dir.mkdir(parents=True, exist_ok=True)
+            (artifact_dir / f"summarizer{label}_prompt.txt").write_text(prompt, encoding="utf-8")
+
+        from mlx_lm import generate  # type: ignore[import-not-found]
+
+        logger.info("mlx generating%s (max_tokens=%d)...", label, max_tokens)
+        t0 = time.perf_counter()
+        raw_output = generate(self._model, self._tokenizer, prompt=prompt, max_tokens=max_tokens)
+        elapsed = time.perf_counter() - t0
+        logger.info("mlx generation%s complete: %d chars in %.1fs", label, len(raw_output), elapsed)
+
+        if artifact_dir:
+            (artifact_dir / f"summarizer{label}_raw_output.txt").write_text(raw_output, encoding="utf-8")
+
+        return raw_output
+
+    def _chunk_note_tokens(self) -> int:
+        return max(512, self.settings.summarizer_max_tokens // 4)
+
+    def _step_tokens(self) -> int:
+        return max(1024, self.settings.summarizer_max_tokens // 2)
+
+    def _summarize_chunk(self, chunk_text: str, chapter_title: str,
+                         chunk_index: int, total_chunks: int,
+                         artifact_dir: Path | None = None) -> str:
+        user_msg = _build_chunk_note_user(chunk_text, chapter_title, chunk_index, total_chunks)
+        raw = self._call_llm(
+            _CHUNK_NOTE_SYSTEM, user_msg, max_tokens=self._chunk_note_tokens(),
+            artifact_dir=artifact_dir, artifact_label=f"chunk_{chunk_index}",
+        )
+        return raw.strip()
+
+    def _synthesize_chapter(self, chapter: dict, chunk_notes: list[str],
+                            artifact_dir: Path | None = None) -> dict:
+        user_msg = _build_chapter_synthesis_user(chapter, chunk_notes)
+        raw = self._call_llm(
+            _CHAPTER_SYNTHESIS_SYSTEM, user_msg, max_tokens=self._step_tokens(),
+            artifact_dir=artifact_dir, artifact_label="chapter_synthesis",
+        )
+        return json.loads(extract_json(raw))
+
+    def _synthesize_overall(self, source_metadata: dict,
+                            chapter_summaries: list[dict],
+                            artifact_dir: Path | None = None) -> dict:
+        user_msg = _build_overall_synthesis_user(source_metadata, chapter_summaries)
+        raw = self._call_llm(
+            _OVERALL_SYNTHESIS_SYSTEM, user_msg, max_tokens=self._step_tokens(),
+            artifact_dir=artifact_dir, artifact_label="overall_synthesis",
+        )
+        return json.loads(extract_json(raw))
+
     def summarize(
         self,
         source_metadata: dict,
@@ -131,53 +265,67 @@ class MlxQwenSummaryGenerator:
         chapters: list[dict],
         output_languages: list[str],
         artifact_dir: Optional[Path] = None,
+        progress_callback: Optional[Callable[[str], None]] = None,
     ) -> dict:
         try:
             self._ensure_model_loaded()
-            system_msg, user_msg = build_summarizer_prompt(self.settings, source_metadata, chapters, output_languages)
-            prompt = self._apply_chat_template(system_msg, user_msg)
-            logger.info("prompt built: %d chars, %d chapters", len(prompt), len(chapters))
+            max_input_chars = self.settings.summarizer_max_input_chars
+            all_chunk_notes: dict[int, list[str]] = {}
+            chapter_summaries: list[dict] = []
 
-            # Save prompt to artifact for debugging.
-            if artifact_dir:
+            if progress_callback:
+                progress_callback("summarizing_chunks")
+
+            for ch_idx, chapter in enumerate(chapters):
+                seg_chunks = chunk_segments(chapter.get("segments", []), max_input_chars)
+                ch_artifact = (artifact_dir / f"ch{ch_idx}") if artifact_dir else None
+
+                if len(seg_chunks) <= 1:
+                    # Single chunk — synthesize chapter directly from segment text.
+                    text = segments_to_text(seg_chunks[0]) if seg_chunks else chapter.get("text", "")
+                    notes = [text]
+                else:
+                    # Multiple chunks — produce a note per chunk first.
+                    notes = []
+                    for c_idx, seg_chunk in enumerate(seg_chunks):
+                        text = segments_to_text(seg_chunk)
+                        note = self._summarize_chunk(
+                            text, chapter.get("title_hint", ""),
+                            c_idx, len(seg_chunks), artifact_dir=ch_artifact,
+                        )
+                        notes.append(note)
+                    all_chunk_notes[ch_idx] = notes
+
+                if progress_callback:
+                    progress_callback("synthesizing_chapters")
+
+                ch_summary = self._synthesize_chapter(chapter, notes, artifact_dir=ch_artifact)
+                chapter_summaries.append(ch_summary)
+
+            if progress_callback:
+                progress_callback("synthesizing_overall")
+
+            overall = self._synthesize_overall(source_metadata, chapter_summaries, artifact_dir=artifact_dir)
+
+            # Save chunk notes artifact.
+            if artifact_dir and all_chunk_notes:
                 artifact_dir.mkdir(parents=True, exist_ok=True)
-                (artifact_dir / "summarizer_prompt.txt").write_text(prompt, encoding="utf-8")
+                (artifact_dir / "chunk_notes.json").write_text(
+                    json.dumps(all_chunk_notes, ensure_ascii=False, indent=2), encoding="utf-8"
+                )
 
-            from mlx_lm import generate  # type: ignore[import-not-found]
+            logger.info("hierarchical summarization complete: %d chapters", len(chapter_summaries))
+            return {"chapters": chapter_summaries, "overall_summary": overall}
 
-            max_tokens = compute_max_tokens(self.settings, len(chapters))
-            logger.info("generating summary (max_tokens=%d, chapters=%d)...", max_tokens, len(chapters))
-            t0 = time.perf_counter()
-            raw_output = generate(self._model, self._tokenizer, prompt=prompt, max_tokens=max_tokens)
-            elapsed = time.perf_counter() - t0
-            logger.info("generation complete: %d chars output in %.1fs (%.0f chars/s)",
-                        len(raw_output), elapsed, len(raw_output) / elapsed if elapsed > 0 else 0)
-
-            # Save raw LLM output to artifact for debugging.
-            if artifact_dir:
-                (artifact_dir / "summarizer_raw_output.txt").write_text(raw_output, encoding="utf-8")
-
-            output = extract_json(raw_output)
-            parsed = json.loads(output)
-            logger.info("output parsed successfully: chapters=%d", len(parsed.get("chapters", [])))
-        except json.JSONDecodeError as exc:
-            logger.warning("LLM output was not valid JSON (%s), falling back to rule-based. Raw output:\n%s",
-                           exc, raw_output[:2000] if raw_output else "<empty>")
-            return RuleBasedSummaryGenerator(self.settings).summarize(
-                source_metadata=source_metadata,
-                transcript_segments=transcript_segments,
-                chapters=chapters,
-                output_languages=output_languages,
-            )
         except Exception as exc:
-            logger.warning("MLX summarizer failed (%s: %s), falling back to rule-based", type(exc).__name__, exc)
+            logger.warning("MLX hierarchical summarizer failed (%s: %s), falling back to rule-based",
+                           type(exc).__name__, exc)
             return RuleBasedSummaryGenerator(self.settings).summarize(
                 source_metadata=source_metadata,
                 transcript_segments=transcript_segments,
                 chapters=chapters,
                 output_languages=output_languages,
             )
-        return parsed
 
     def _ensure_model_loaded(self) -> None:
         if self._model is not None and self._tokenizer is not None:
@@ -219,18 +367,18 @@ class OmlxSummaryGenerator:
     def __init__(self, settings: Settings) -> None:
         self.settings = settings
 
-    def summarize(
+    def _call_omlx(
         self,
-        source_metadata: dict,
-        transcript_segments: list[dict],
-        chapters: list[dict],
-        output_languages: list[str],
-        artifact_dir: Optional[Path] = None,
-    ) -> dict:
+        system_msg: str,
+        user_msg: str,
+        max_tokens: int,
+        artifact_dir: Path | None = None,
+        artifact_label: str = "",
+    ) -> str:
+        """Send messages to oMLX server, save artifacts, return raw text."""
         import httpx
 
-        system_msg, user_msg = build_summarizer_prompt(self.settings, source_metadata, chapters, output_languages)
-        max_tokens = compute_max_tokens(self.settings, len(chapters))
+        label = f"_{artifact_label}" if artifact_label else ""
 
         request_body = {
             "model": self.settings.omlx_model,
@@ -240,17 +388,14 @@ class OmlxSummaryGenerator:
             ],
             "max_tokens": max_tokens,
             "stream": False,
-            # Suppress Qwen3.5 thinking mode via chat template kwargs.
-            # oMLX passes this through to tokenizer.apply_chat_template().
             "chat_template_kwargs": {"enable_thinking": False},
         }
 
-        # Save prompt artifact.
         if artifact_dir:
             artifact_dir.mkdir(parents=True, exist_ok=True)
             prompt_text = f"=== SYSTEM ===\n{system_msg}\n\n=== USER ===\n{user_msg}"
-            (artifact_dir / "summarizer_prompt.txt").write_text(prompt_text, encoding="utf-8")
-            (artifact_dir / "summarizer_request.json").write_text(
+            (artifact_dir / f"summarizer{label}_prompt.txt").write_text(prompt_text, encoding="utf-8")
+            (artifact_dir / f"summarizer{label}_request.json").write_text(
                 json.dumps(request_body, indent=2, ensure_ascii=False), encoding="utf-8"
             )
 
@@ -259,51 +404,125 @@ class OmlxSummaryGenerator:
         if self.settings.omlx_api_key:
             headers["Authorization"] = f"Bearer {self.settings.omlx_api_key}"
 
-        try:
-            logger.info(
-                "omlx request: url=%s model=%s max_tokens=%d chapters=%d",
-                url, self.settings.omlx_model, max_tokens, len(chapters),
-            )
-            t0 = time.perf_counter()
-            response = httpx.post(
-                url,
-                json=request_body,
-                headers=headers,
-                timeout=self.settings.omlx_timeout_seconds,
-            )
-            elapsed = time.perf_counter() - t0
-            logger.info("omlx response: status=%d elapsed=%.1fs", response.status_code, elapsed)
-
-            response.raise_for_status()
-            data = response.json()
-            raw_output = data["choices"][0]["message"]["content"]
-
-            if artifact_dir:
-                (artifact_dir / "summarizer_raw_output.txt").write_text(raw_output, encoding="utf-8")
-
-            output = extract_json(raw_output)
-            parsed = json.loads(output)
-            logger.info("omlx output parsed: chapters=%d", len(parsed.get("chapters", [])))
-            return parsed
-
-        except json.JSONDecodeError as exc:
-            logger.warning("omlx output not valid JSON (%s), falling back to rule-based", exc)
-        except httpx.TimeoutException:
-            logger.warning("omlx request timed out after %ds, falling back to rule-based",
-                           self.settings.omlx_timeout_seconds)
-        except httpx.HTTPStatusError as exc:
-            logger.warning("omlx HTTP error %d, falling back to rule-based", exc.response.status_code)
-        except (httpx.RequestError, KeyError, IndexError, TypeError) as exc:
-            logger.warning("omlx request failed (%s: %s), falling back to rule-based", type(exc).__name__, exc)
-        except Exception as exc:
-            logger.warning("omlx unexpected error (%s: %s), falling back to rule-based", type(exc).__name__, exc)
-
-        return RuleBasedSummaryGenerator(self.settings).summarize(
-            source_metadata=source_metadata,
-            transcript_segments=transcript_segments,
-            chapters=chapters,
-            output_languages=output_languages,
+        logger.info("omlx request%s: url=%s model=%s max_tokens=%d", label, url, self.settings.omlx_model, max_tokens)
+        t0 = time.perf_counter()
+        response = httpx.post(
+            url,
+            json=request_body,
+            headers=headers,
+            timeout=self.settings.omlx_timeout_seconds,
         )
+        elapsed = time.perf_counter() - t0
+        logger.info("omlx response%s: status=%d elapsed=%.1fs", label, response.status_code, elapsed)
+
+        response.raise_for_status()
+        data = response.json()
+        raw_output = data["choices"][0]["message"]["content"]
+
+        if artifact_dir:
+            (artifact_dir / f"summarizer{label}_raw_output.txt").write_text(raw_output, encoding="utf-8")
+
+        return raw_output
+
+    def _chunk_note_tokens(self) -> int:
+        return max(512, self.settings.summarizer_max_tokens // 4)
+
+    def _step_tokens(self) -> int:
+        return max(1024, self.settings.summarizer_max_tokens // 2)
+
+    def _summarize_chunk(self, chunk_text: str, chapter_title: str,
+                         chunk_index: int, total_chunks: int,
+                         artifact_dir: Path | None = None) -> str:
+        user_msg = _build_chunk_note_user(chunk_text, chapter_title, chunk_index, total_chunks)
+        raw = self._call_omlx(
+            _CHUNK_NOTE_SYSTEM, user_msg, max_tokens=self._chunk_note_tokens(),
+            artifact_dir=artifact_dir, artifact_label=f"chunk_{chunk_index}",
+        )
+        return raw.strip()
+
+    def _synthesize_chapter(self, chapter: dict, chunk_notes: list[str],
+                            artifact_dir: Path | None = None) -> dict:
+        user_msg = _build_chapter_synthesis_user(chapter, chunk_notes)
+        raw = self._call_omlx(
+            _CHAPTER_SYNTHESIS_SYSTEM, user_msg, max_tokens=self._step_tokens(),
+            artifact_dir=artifact_dir, artifact_label="chapter_synthesis",
+        )
+        return json.loads(extract_json(raw))
+
+    def _synthesize_overall(self, source_metadata: dict,
+                            chapter_summaries: list[dict],
+                            artifact_dir: Path | None = None) -> dict:
+        user_msg = _build_overall_synthesis_user(source_metadata, chapter_summaries)
+        raw = self._call_omlx(
+            _OVERALL_SYNTHESIS_SYSTEM, user_msg, max_tokens=self._step_tokens(),
+            artifact_dir=artifact_dir, artifact_label="overall_synthesis",
+        )
+        return json.loads(extract_json(raw))
+
+    def summarize(
+        self,
+        source_metadata: dict,
+        transcript_segments: list[dict],
+        chapters: list[dict],
+        output_languages: list[str],
+        artifact_dir: Optional[Path] = None,
+        progress_callback: Optional[Callable[[str], None]] = None,
+    ) -> dict:
+        try:
+            max_input_chars = self.settings.summarizer_max_input_chars
+            all_chunk_notes: dict[int, list[str]] = {}
+            chapter_summaries: list[dict] = []
+
+            if progress_callback:
+                progress_callback("summarizing_chunks")
+
+            for ch_idx, chapter in enumerate(chapters):
+                seg_chunks = chunk_segments(chapter.get("segments", []), max_input_chars)
+                ch_artifact = (artifact_dir / f"ch{ch_idx}") if artifact_dir else None
+
+                if len(seg_chunks) <= 1:
+                    text = segments_to_text(seg_chunks[0]) if seg_chunks else chapter.get("text", "")
+                    notes = [text]
+                else:
+                    notes = []
+                    for c_idx, seg_chunk in enumerate(seg_chunks):
+                        text = segments_to_text(seg_chunk)
+                        note = self._summarize_chunk(
+                            text, chapter.get("title_hint", ""),
+                            c_idx, len(seg_chunks), artifact_dir=ch_artifact,
+                        )
+                        notes.append(note)
+                    all_chunk_notes[ch_idx] = notes
+
+                if progress_callback:
+                    progress_callback("synthesizing_chapters")
+
+                ch_summary = self._synthesize_chapter(chapter, notes, artifact_dir=ch_artifact)
+                chapter_summaries.append(ch_summary)
+
+            if progress_callback:
+                progress_callback("synthesizing_overall")
+
+            overall = self._synthesize_overall(source_metadata, chapter_summaries, artifact_dir=artifact_dir)
+
+            if artifact_dir and all_chunk_notes:
+                artifact_dir.mkdir(parents=True, exist_ok=True)
+                (artifact_dir / "chunk_notes.json").write_text(
+                    json.dumps(all_chunk_notes, ensure_ascii=False, indent=2), encoding="utf-8"
+                )
+
+            logger.info("omlx hierarchical summarization complete: %d chapters", len(chapter_summaries))
+            return {"chapters": chapter_summaries, "overall_summary": overall}
+
+        except Exception as exc:
+            logger.warning("omlx hierarchical summarizer failed (%s: %s), falling back to rule-based",
+                           type(exc).__name__, exc)
+            return RuleBasedSummaryGenerator(self.settings).summarize(
+                source_metadata=source_metadata,
+                transcript_segments=transcript_segments,
+                chapters=chapters,
+                output_languages=output_languages,
+            )
 
 
 # ---------------------------------------------------------------------------
@@ -324,6 +543,7 @@ class RuleBasedSummaryGenerator:
         chapters: list[dict],
         output_languages: list[str],
         artifact_dir: Optional[Path] = None,
+        progress_callback: Optional[Callable[[str], None]] = None,
     ) -> dict:
         chapter_summaries = []
         all_text = " ".join(segment["text"] for segment in transcript_segments)
