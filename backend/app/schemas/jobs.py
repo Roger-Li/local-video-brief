@@ -61,6 +61,24 @@ class TranscriptStats(BaseModel):
     source_mode: str = "captions"
 
 
+class StudySection(BaseModel):
+    chapter_index: int
+    start_s: float
+    end_s: float
+    title: str
+    summary_en: str
+    summary_zh: str
+    key_points: List[str]
+
+
+class StudyPack(BaseModel):
+    version: int = 1
+    format: str = "lecture_study_guide"
+    learning_objectives: List[str]
+    sections: List[StudySection]
+    final_takeaways: List[str]
+
+
 class JobResultResponse(BaseModel):
     job_id: str
     status: str
@@ -70,3 +88,4 @@ class JobResultResponse(BaseModel):
     overall_summary: OverallSummary
     artifacts: Dict[str, Any]
     transcript_stats: Optional[TranscriptStats] = None
+    study_pack: Optional[StudyPack] = None
