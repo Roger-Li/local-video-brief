@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import type { JobResultResponse } from "../types/api";
 import { StudyGuideView } from "./StudyGuideView";
 
@@ -19,6 +19,12 @@ interface ResultViewProps {
 export function ResultView({ result }: ResultViewProps) {
   const hasStudyPack = result.study_pack != null;
   const [activeTab, setActiveTab] = useState<Tab>("summary");
+
+  useEffect(() => {
+    if (activeTab === "study-guide" && !hasStudyPack) {
+      setActiveTab("summary");
+    }
+  }, [hasStudyPack, activeTab]);
 
   const tabs: { id: Tab; label: string; hidden?: boolean }[] = [
     { id: "summary", label: "Summary" },

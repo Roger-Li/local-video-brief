@@ -40,12 +40,15 @@ def chunk_segments(segments: list[dict], max_chars: int) -> list[list[dict]]:
     current_len = 0
     for seg in segments:
         seg_len = len(seg.get("text", ""))
-        if current and current_len + seg_len > max_chars:
+        # Account for the joining space that segments_to_text inserts
+        added_len = seg_len + (1 if current else 0)
+        if current and current_len + added_len > max_chars:
             chunks.append(current)
             current = []
             current_len = 0
+            added_len = seg_len
         current.append(seg)
-        current_len += seg_len
+        current_len += added_len
     if current:
         chunks.append(current)
     return chunks

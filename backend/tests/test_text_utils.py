@@ -9,8 +9,8 @@ def _seg(text: str, start: float = 0.0, end: float = 1.0) -> dict:
 
 def test_chunk_segments_respects_boundaries():
     segs = [_seg("aaa"), _seg("bbb"), _seg("ccc"), _seg("ddd")]
-    chunks = chunk_segments(segs, max_chars=6)
-    # Each chunk's total text length <= 6; no segment split across chunks.
+    # Budget accounts for joining spaces: "aaa bbb" = 7 chars
+    chunks = chunk_segments(segs, max_chars=7)
     assert len(chunks) == 2
     assert chunks[0] == [segs[0], segs[1]]
     assert chunks[1] == [segs[2], segs[3]]
