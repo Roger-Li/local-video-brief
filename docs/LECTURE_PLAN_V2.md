@@ -87,6 +87,43 @@ E2E testing against a 61-minute workshop (YouTube Live) and comparison with Gemi
 - Add a deterministic export renderer that reads `study_pack.json` and produces standalone Markdown or HTML as a post-processing/export step, not as part of core summarization logic.
 - Treat Codex skills as optional consumers of `study_pack.json` for future slide or polished webpage generation, but do not make backend runtime depend on Codex skills.
 
+## Phase D — Per-Job Configuration Options
+
+- Currently all configuration lives in server-side env vars set at backend startup. Users cannot toggle options per-job.
+- Add optional per-job overrides to `CreateJobRequest`. When omitted, fall back to server defaults — fully backward compatible.
+- Add a collapsible "Options" section in the frontend form.
+
+### v1 scope
+
+Two per-job options:
+- `enable_study_pack` (boolean) — toggle study guide generation per video
+- `enable_transcript_normalization` (boolean) — bypass normalization for specific videos
+
+**Not in v1:** `summarizer_provider` — the MLX provider loads a multi-GB model into GPU memory at startup. Dynamic provider switching requires a provider pool with memory management. Deferred to v2.
+
+### Backend changes
+
+- `JobOptions` Pydantic model with optional fields (all `None` = use server default).
+- `options: Optional[JobOptions] = None` on `CreateJobRequest`.
+- `options TEXT` column on `jobs` table (JSON, default `'{}'`). Safe migration via `ALTER TABLE ADD COLUMN` with try/except.
+- `resolve_job_setting(job_options, key, settings)` helper: checks job options first, falls back to global `Settings`.
+- Pipeline reads `job.options` at start of `process_job()` and resolves each setting locally instead of reading `self._settings` directly.
+- `JobStatusResponse` echoes back the resolved options so the frontend can display them.
+
+### Frontend changes
+
+- `JobOptions` TypeScript interface, `options?: JobOptions` on `CreateJobRequest`.
+- Collapsible "Options" section in `JobForm.tsx` below the URL field, collapsed by default.
+- Two toggles: "Generate study guide" (`enable_study_pack`), "Normalize transcript" (`enable_transcript_normalization`, default checked).
+- `null` state = "use server default"; only non-null values sent in the request.
+
+### v2 scope (future)
+
+- `summarizer_provider` per-job (requires provider pool with memory management for MLX)
+- `max_chapter_minutes` per-job
+- `output_languages` as part of the options UI (already per-job in the API)
+- Per-job `summarizer_max_input_chars` / `summarizer_max_tokens` for advanced users
+
 ## Public Interface Changes
 
 - Add optional `study_pack` to the job result response.

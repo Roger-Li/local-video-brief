@@ -14,3 +14,8 @@ data/
 .env
 .vscode/
 *.egg-info/
+frontend/vite.config.js
+frontend/vite.config.d.ts
+frontend/tsconfig.tsbuildinfo
+frontend/tsconfig.node.tsbuildinfo
+.claude/settings.local.json

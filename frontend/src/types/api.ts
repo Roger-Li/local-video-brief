@@ -47,6 +47,24 @@ export interface OverallSummary {
   highlights: string[];
 }
 
+export interface StudySection {
+  chapter_index: number;
+  start_s: number;
+  end_s: number;
+  title: string;
+  summary_en: string;
+  summary_zh: string;
+  key_points: string[];
+}
+
+export interface StudyPack {
+  version: number;
+  format: string;
+  learning_objectives: string[];
+  sections: StudySection[];
+  final_takeaways: string[];
+}
+
 export interface JobResultResponse {
   job_id: string;
   status: JobStatus;
@@ -55,5 +73,6 @@ export interface JobResultResponse {
   chapters: ChapterSummary[];
   overall_summary: OverallSummary;
   artifacts: Record<string, unknown>;
+  study_pack?: StudyPack | null;
 }
 

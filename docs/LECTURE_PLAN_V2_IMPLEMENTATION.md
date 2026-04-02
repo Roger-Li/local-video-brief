@@ -418,6 +418,197 @@ return JobResultResponse(
 
 ---
 
+## Phase D — Per-Job Configuration Options
+
+**Goal:** Optional per-job overrides in the API and a collapsible options section in the frontend form. Omitted options fall back to server defaults — fully backward compatible.
+
+### D1. `JobOptions` schema and `CreateJobRequest` update
+
+**File:** `backend/app/schemas/jobs.py`
+
+```python
+class JobOptions(BaseModel):
+    enable_study_pack: Optional[bool] = None
+    enable_transcript_normalization: Optional[bool] = None
+```
+
+Add to `CreateJobRequest`:
+```python
+options: Optional[JobOptions] = None
+```
+
+All fields Optional — `None` means "use server default." Existing clients that omit `options` are unaffected.
+
+### D2. `JobRecord` and database migration
+
+**File:** `backend/app/models/job.py`
+```python
+options: Dict[str, Any] = field(default_factory=dict)
+```
+
+**File:** `backend/app/db/database.py`
+
+Add migration after `CREATE TABLE`:
+```python
+try:
+    connection.execute("ALTER TABLE jobs ADD COLUMN options TEXT DEFAULT '{}'")
+    connection.commit()
+except sqlite3.OperationalError:
+    pass  # Column already exists
+```
+
+**File:** `backend/app/repositories/job_repository.py`
+- `create_job()` — accept `options: dict` parameter, insert into new column
+- `_row_to_job()` — read and `json.loads` the `options` column
+- `update_job()` — add `"options"` to `allowed_json_fields` if needed
+
+### D3. API: pass options through
+
+**File:** `backend/app/api/jobs.py`
+
+```python
+@router.post("")
+def create_job(payload: CreateJobRequest, request: Request) -> CreateJobResponse:
+    repository = request.app.state.job_repository
+    options_dict = payload.options.model_dump(exclude_none=True) if payload.options else {}
+    job = repository.create_job(
+        url=str(payload.url),
+        output_languages=payload.output_languages,
+        mode=payload.mode,
+        options=options_dict,
+    )
+    return CreateJobResponse(job_id=job.id, status=job.status)
+```
+
+`exclude_none=True` ensures only explicitly-set options are stored. Absent options = use server default.
+
+### D4. `resolve_job_setting` helper
+
+**File:** `backend/app/core/config.py`
+
+```python
+def resolve_job_setting(job_options: dict, key: str, settings: Settings) -> Any:
+    """Return job_options[key] if present, else getattr(settings, key)."""
+    if key in job_options:
+        return job_options[key]
+    return getattr(settings, key)
+```
+
+### D5. Pipeline: use per-job options
+
+**File:** `backend/app/services/pipeline.py`
+
+At the start of `process_job()`:
+```python
+job_options = job.options or {}
+enable_normalization = resolve_job_setting(job_options, "enable_transcript_normalization", self._settings)
+enable_study_pack = resolve_job_setting(job_options, "enable_study_pack", self._settings)
+```
+
+Replace `self._settings.enable_transcript_normalization` with `enable_normalization` and `self._settings.enable_study_pack` with `enable_study_pack`.
+
+### D6. Echo options in job status
+
+**File:** `backend/app/schemas/jobs.py`
+
+Add to `JobStatusResponse`:
+```python
+options: Optional[Dict[str, Any]] = None
+```
+
+**File:** `backend/app/api/jobs.py`
+
+In `get_job()`, include `options=job.options or None`.
+
+### D7. Frontend TypeScript types
+
+**File:** `frontend/src/types/api.ts`
+
+```typescript
+export interface JobOptions {
+  enable_study_pack?: boolean;
+  enable_transcript_normalization?: boolean;
+}
+
+export interface CreateJobRequest {
+  url: string;
+  output_languages?: string[];
+  mode?: "captions_first";
+  options?: JobOptions;
+}
+```
+
+### D8. Frontend form with collapsible options
+
+**File:** `frontend/src/components/JobForm.tsx`
+
+- Add "Options" toggle button below URL field (collapsed by default)
+- When expanded: "Generate study guide" toggle, "Normalize transcript" toggle (default checked)
+- `null` state = "use server default"; only non-null values included in request
+- Form state:
+  ```typescript
+  const [showOptions, setShowOptions] = useState(false);
+  const [enableStudyPack, setEnableStudyPack] = useState<boolean | null>(null);
+  const [enableNormalization, setEnableNormalization] = useState<boolean | null>(null);
+  ```
+
+### D9. Frontend CSS for options
+
+**File:** `frontend/src/styles.css`
+
+- `.options-toggle` — subtle button to expand/collapse
+- `.options-panel` — expanded container
+- `.toggle-row` — label + toggle switch row
+- `.toggle-switch` — CSS-only toggle matching the warm color scheme
+
+### D10. Backend tests
+
+**New file:** `backend/tests/test_job_options.py`
+
+- `test_create_job_without_options` — backward compatibility, `options` defaults to `{}`
+- `test_create_job_with_study_pack_option` — options stored correctly
+- `test_create_job_with_normalization_option` — options stored correctly
+- `test_resolve_job_setting_uses_override` — job option wins when present
+- `test_resolve_job_setting_falls_back_to_global` — global setting used when absent
+- `test_resolve_job_setting_empty_options` — empty dict falls back to global
+- `test_pipeline_respects_per_job_normalization_override` — mock pipeline verifying normalization skipped
+- `test_api_create_job_with_options_returns_201`
+- `test_get_job_status_includes_options`
+
+### D11. E2E skill fix
+
+**File:** `.claude/skills/test-e2e/SKILL.md`
+
+The smoke test uses port 8010 (`OVS_TEST_PORT:-8010`), but the frontend defaults to `http://127.0.0.1:8000`. The frontend step must set `VITE_API_BASE_URL=http://127.0.0.1:${PORT}` matching the smoke test port.
+
+### D12. Update docs
+
+**Files:** `CLAUDE.md`
+
+Add "Per-Job Options" section documenting available overrides, defaults, and the `summarizer_provider` v1 limitation.
+
+### D: Execution order
+
+1. D1 + D4 (schema + helper — independent)
+2. D2 (model + DB migration — depends on D1)
+3. D3 + D5 + D6 (API + pipeline + status — depends on D1, D2, D4)
+4. D10 (backend tests)
+5. D7 + D9 (frontend types + CSS — parallel)
+6. D8 (frontend form — depends on D7, D9)
+7. D11 + D12 (skill fix + docs)
+
+### D: Design decisions
+
+1. **JSON `options` column, not per-field columns** — Adding columns requires ALTER TABLE for each new option. A JSON column is consistent with how `artifacts` and `source_metadata` are stored, and handles sparse optional overrides naturally.
+
+2. **`resolve_job_setting()` helper, not a new Settings subclass** — Keeps it simple. The pipeline calls the helper for the 2 settings it needs. No new abstraction until v2 adds more per-job options.
+
+3. **No `summarizer_provider` in v1** — The MLX provider loads a multi-GB model into GPU memory at `_ensure_model_loaded()`. Creating a new provider instance per-job would require unloading the current model or having two models in memory. Deferred to v2 with a provider pool.
+
+4. **`exclude_none=True` on serialization** — Only explicitly-set options are stored. This distinguishes "user chose false" from "user didn't set anything" (absent key = server default).
+
+---
+
 ## Files Summary
 
 ### Modified
@@ -430,9 +621,17 @@ return JobResultResponse(
 | `backend/app/core/config.py` | B | `enable_study_pack` flag |
 | `backend/app/schemas/jobs.py` | B | `StudyPack`, `StudySection` models, optional field |
 | `backend/app/api/jobs.py` | B | Explicit `study_pack` pass-through in response construction |
-| `frontend/src/types/api.ts` | C | `StudyPack` types |
+| `frontend/src/types/api.ts` | C+D | `StudyPack` types; `JobOptions` type, `options` on `CreateJobRequest` |
 | `frontend/src/components/ResultView.tsx` | C | Tabbed layout |
-| `frontend/src/styles.css` | C | Tab + study guide styles |
+| `frontend/src/styles.css` | C+D | Tab + study guide styles; options toggle + panel styles |
+| `backend/app/models/job.py` | D | `options` field on `JobRecord` |
+| `backend/app/db/database.py` | D | `ALTER TABLE` migration for `options` column |
+| `backend/app/repositories/job_repository.py` | D | Read/write `options` in create/row mapping |
+| `backend/app/core/config.py` | D | `resolve_job_setting()` helper |
+| `backend/app/schemas/jobs.py` | B+D | `JobOptions` model; `options` on `CreateJobRequest` and `JobStatusResponse` |
+| `backend/app/api/jobs.py` | B+D | Pass `options` through in create; echo in status |
+| `backend/app/services/pipeline.py` | A+B+D | Per-job option resolution in `process_job()` |
+| `frontend/src/components/JobForm.tsx` | D | Collapsible options section |
 
 ### Created
 | File | Phase | Purpose |
@@ -443,6 +642,7 @@ return JobResultResponse(
 | `backend/tests/test_study_pack.py` | B | Study pack tests |
 | `frontend/src/components/StudyGuideView.tsx` | C | Study guide component |
 | `frontend/src/lib/export.ts` | C | Markdown export + download |
+| `backend/tests/test_job_options.py` | D | Per-job options tests |
 
 ---
 
@@ -475,6 +675,16 @@ OVS_ENABLE_MLX_SUMMARIZER=true OVS_ENABLE_STUDY_PACK=true ./scripts/test_video_j
 cd frontend && npm run build  # TypeScript check
 cd frontend && npm run dev    # Manual: tabs render, study guide shows when present
 # Export: download produces valid Markdown
+```
+
+### Phase D
+```bash
+python3 -m pytest backend/tests/test_job_options.py -v
+python3 -m pytest backend/tests -v  # full suite, no regressions
+cd frontend && npx tsc --noEmit --skipLibCheck && npx vite build
+# E2E: submit via UI with "Generate study guide" toggled ON → study_pack present
+# E2E: submit via UI with toggle OFF → study_pack null
+# E2E: submit without expanding options → uses server defaults
 ```
 
 ---

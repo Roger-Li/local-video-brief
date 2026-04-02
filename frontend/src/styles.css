@@ -272,6 +272,105 @@ code {
   margin: 0;
 }
 
+.tab-bar {
+  display: flex;
+  gap: 0.25rem;
+  padding: 0.35rem;
+  background: rgba(255, 255, 255, 0.04);
+  border-radius: 16px;
+  margin-bottom: 1.5rem;
+}
+
+.tab-button {
+  flex: 1;
+  border: none;
+  border-radius: 12px;
+  padding: 0.7rem 1rem;
+  background: transparent;
+  color: var(--muted);
+  font-size: 0.92rem;
+  font-weight: 500;
+  cursor: pointer;
+  transition: background 0.15s, color 0.15s;
+}
+
+.tab-button:hover {
+  color: var(--text);
+}
+
+.tab-active {
+  background: rgba(255, 179, 71, 0.14);
+  color: var(--accent);
+}
+
+.study-guide-panel {
+  display: grid;
+  gap: 1.5rem;
+}
+
+.study-guide-panel h3 {
+  margin: 0 0 0.5rem;
+}
+
+.study-guide-panel .objectives-list,
+.study-guide-panel .takeaways-list {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+  display: grid;
+  gap: 0.5rem;
+}
+
+.study-guide-panel .objectives-list li,
+.study-guide-panel .takeaways-list li {
+  padding: 0.6rem 0.9rem;
+  border-radius: 12px;
+  background: rgba(255, 179, 71, 0.08);
+  border: 1px solid rgba(255, 179, 71, 0.12);
+  color: var(--text);
+}
+
+.study-section-card {
+  padding: 1rem;
+  border-radius: 18px;
+  background: rgba(255, 255, 255, 0.03);
+  border: 1px solid rgba(255, 255, 255, 0.05);
+}
+
+.study-section-card h4 {
+  margin: 0 0 0.5rem;
+}
+
+.study-section-card p {
+  margin: 0.5rem 0;
+}
+
+.study-section-card ul {
+  margin: 0.75rem 0 0;
+  padding-left: 1.1rem;
+}
+
+.export-bar {
+  display: flex;
+  justify-content: flex-end;
+}
+
+.export-button {
+  border: 1px solid var(--panel-border);
+  border-radius: 999px;
+  padding: 0.55rem 1.1rem;
+  background: rgba(255, 255, 255, 0.05);
+  color: var(--muted);
+  font-size: 0.85rem;
+  cursor: pointer;
+  transition: background 0.15s, color 0.15s;
+}
+
+.export-button:hover {
+  background: rgba(255, 179, 71, 0.12);
+  color: var(--accent);
+}
+
 @media (max-width: 720px) {
   .content-stack {
     padding: 1.25rem 0.9rem 2rem;
