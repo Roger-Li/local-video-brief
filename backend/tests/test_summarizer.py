@@ -17,6 +17,7 @@ from backend.app.services.summarizer import (
     compute_max_tokens,
     create_summary_generator,
     extract_json,
+    parse_model_json,
 )
 
 
@@ -127,6 +128,49 @@ def test_extract_json_strips_markdown_fences():
 def test_extract_json_handles_trailing_chars():
     raw = '{"key": "value"}extra stuff'
     assert json.loads(extract_json(raw)) == {"key": "value"}
+
+
+def test_parse_model_json_tolerates_literal_newlines_in_strings():
+    raw = '{"summary_en": "Line 1\nLine 2", "highlights": ["A"]}'
+    assert parse_model_json(raw) == {
+        "summary_en": "Line 1\nLine 2",
+        "highlights": ["A"],
+    }
+
+
+def test_parse_model_json_tolerates_unescaped_inner_quotes():
+    raw = '{"key_points": ["提出“反向 OPI"概念"]}'
+    assert parse_model_json(raw) == {"key_points": ['提出“反向 OPI"概念']}
+
+
+def test_parse_model_json_tolerates_inner_quotes_before_comma():
+    raw = '{"key_points": ["she calls it "OPI", then..."], "summary_en": "ok"}'
+    assert parse_model_json(raw) == {
+        "key_points": ['she calls it "OPI", then...'],
+        "summary_en": "ok",
+    }
+
+
+def test_parse_model_json_tolerates_inner_quotes_before_colon():
+    raw = '{"key_points": ["term "foo": ..."], "summary_en": "ok"}'
+    assert parse_model_json(raw) == {
+        "key_points": ['term "foo": ...'],
+        "summary_en": "ok",
+    }
+
+
+def test_parse_model_json_keeps_single_array_item_for_multiple_quoted_phrases():
+    raw = '{"key_points": ["call it "A", "B", and "C""], "summary_en": "ok"}'
+    assert parse_model_json(raw) == {
+        "key_points": ['call it "A", "B", and "C"'],
+        "summary_en": "ok",
+    }
+
+
+def test_parse_model_json_rejects_repaired_payload_missing_required_keys():
+    raw = '{"summary_en": "ok" "summary_zh": "z", "highlights": ["h"]}'
+    with pytest.raises(ValueError, match="missing required keys: summary_zh"):
+        parse_model_json(raw, required_keys={"summary_en", "summary_zh", "highlights"})
 
 
 def test_compute_max_tokens_uses_formula():
@@ -300,6 +344,28 @@ CHAPTER_SUMMARY_B = {
     "key_points": ["point B"],
 }
 
+TWO_SIMPLE_SEGMENTS = [
+    {"text": "First chapter sentence one. First chapter sentence two.", "start_s": 0.0, "end_s": 60.0, "source": "captions"},
+    {"text": "Second chapter sentence one. Second chapter sentence two.", "start_s": 60.0, "end_s": 120.0, "source": "captions"},
+]
+
+TWO_SIMPLE_CHAPTERS = [
+    {
+        "start_s": 0.0,
+        "end_s": 60.0,
+        "title_hint": "First Chapter",
+        "text": "First chapter sentence one. First chapter sentence two.",
+        "segments": [TWO_SIMPLE_SEGMENTS[0]],
+    },
+    {
+        "start_s": 60.0,
+        "end_s": 120.0,
+        "title_hint": "Second Chapter",
+        "text": "Second chapter sentence one. Second chapter sentence two.",
+        "segments": [TWO_SIMPLE_SEGMENTS[1]],
+    },
+]
+
 
 class TestOmlxHierarchical:
     def test_summarize_chunk_returns_note(self):
@@ -317,6 +383,31 @@ class TestOmlxHierarchical:
             result = gen._synthesize_chapter(SAMPLE_CHAPTERS[0], ["note 1", "note 2"])
         assert result["title"] == "Introduction"
         assert "summary_en" in result
+
+    def test_synthesize_chapter_tolerates_literal_newlines(self):
+        settings = _omlx_settings()
+        gen = OmlxSummaryGenerator(settings)
+        raw_json = (
+            '{"start_s": 0.0, "end_s": 60.0, "title": "Introduction", '
+            '"summary_en": "Line 1\nLine 2", "summary_zh": "第一行\n第二行", '
+            '"key_points": ["Introduction to topic"]}'
+        )
+        with patch.object(gen, "_call_omlx", return_value=raw_json):
+            result = gen._synthesize_chapter(SAMPLE_CHAPTERS[0], ["note 1", "note 2"])
+        assert result["summary_en"] == "Line 1\nLine 2"
+        assert result["summary_zh"] == "第一行\n第二行"
+
+    def test_synthesize_chapter_tolerates_unescaped_inner_quotes(self):
+        settings = _omlx_settings()
+        gen = OmlxSummaryGenerator(settings)
+        raw_json = (
+            '{"start_s": 0.0, "end_s": 60.0, "title": "Introduction", '
+            '"summary_en": "Topic overview.", "summary_zh": "主题概述。", '
+            '"key_points": ["提出“反向 OPI"概念"]}'
+        )
+        with patch.object(gen, "_call_omlx", return_value=raw_json):
+            result = gen._synthesize_chapter(SAMPLE_CHAPTERS[0], ["note 1", "note 2"])
+        assert result["key_points"] == ['提出“反向 OPI"概念']
 
     def test_synthesize_overall_parses_json(self):
         settings = _omlx_settings()
@@ -392,6 +483,33 @@ class TestOmlxHierarchical:
         # Fell back to rule-based.
         assert result["chapters"][0]["title"] == "Chapter 1"
 
+    def test_partial_chapter_fallback_preserves_successful_llm_output(self):
+        settings = _omlx_settings()
+        gen = OmlxSummaryGenerator(settings)
+        responses = [
+            json.dumps(VALID_CHAPTER_SUMMARY),
+            "not json at all",
+            json.dumps(VALID_OVERALL_SUMMARY),
+        ]
+        with patch.object(gen, "_call_omlx", side_effect=responses):
+            result = gen.summarize(SAMPLE_METADATA, TWO_SIMPLE_SEGMENTS, TWO_SIMPLE_CHAPTERS, ["en", "zh-CN"])
+        assert result["chapters"][0]["title"] == "Introduction"
+        assert result["chapters"][1]["title"] == "Second Chapter"
+        assert result["overall_summary"]["summary_en"] == VALID_OVERALL_SUMMARY["summary_en"]
+
+    def test_invalid_overall_payload_falls_back_to_rule_based_overall(self):
+        settings = _omlx_settings()
+        gen = OmlxSummaryGenerator(settings)
+        responses = [
+            json.dumps(VALID_CHAPTER_SUMMARY),
+            '{"summary_en": "ok" "summary_zh": "z", "highlights": ["h"]}',
+        ]
+        with patch.object(gen, "_call_omlx", side_effect=responses):
+            result = gen.summarize(SAMPLE_METADATA, SAMPLE_SEGMENTS, SAMPLE_CHAPTERS, ["en", "zh-CN"])
+        assert result["chapters"][0]["title"] == "Introduction"
+        assert result["overall_summary"]["summary_zh"]
+        assert isinstance(result["overall_summary"]["highlights"], list)
+
     def test_progress_callback_called(self):
         settings = _omlx_settings()
         gen = OmlxSummaryGenerator(settings)
@@ -427,3 +545,21 @@ def test_extract_json_empty_string():
 def test_extract_json_nested_braces():
     raw = '{"outer": {"inner": "value"}}'
     assert json.loads(extract_json(raw)) == {"outer": {"inner": "value"}}
+
+
+def test_rule_based_summarize_overall_uses_transcript_text():
+    settings = Settings()
+    gen = RuleBasedSummaryGenerator(settings)
+    segments = [{"text": "S1. S2. S3.", "start_s": 0.0, "end_s": 9.0, "source": "captions"}]
+    chapters = [
+        {
+            "start_s": 0.0,
+            "end_s": 9.0,
+            "title_hint": "C1",
+            "text": "S1. S2. S3.",
+            "segments": segments,
+        }
+    ]
+    result = gen.summarize({"title": "T"}, segments, chapters, ["en"])
+    assert result["overall_summary"]["summary_en"] == "S1. S2. S3."
+    assert result["overall_summary"]["highlights"] == ["S1.", "S2.", "S3."]

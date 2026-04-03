@@ -109,6 +109,264 @@ def extract_json(raw: str) -> str:
     return cleaned
 
 
+def _next_non_whitespace_index(raw: str, start: int) -> int:
+    while start < len(raw) and raw[start] in " \t\r\n":
+        start += 1
+    return start
+
+
+def _literal_has_boundary(raw: str, start: int, literal: str) -> bool:
+    if not raw.startswith(literal, start):
+        return False
+    next_index = _next_non_whitespace_index(raw, start + len(literal))
+    if next_index >= len(raw):
+        return True
+    return raw[next_index] in ",}]"
+
+
+def _find_unescaped_quote_end(raw: str, start_quote_index: int) -> int | None:
+    escape = False
+    for index in range(start_quote_index + 1, len(raw)):
+        char = raw[index]
+        if escape:
+            escape = False
+            continue
+        if char == "\\":
+            escape = True
+            continue
+        if char == '"':
+            return index
+    return None
+
+
+def _quoted_token_looks_standalone_after_comma(raw: str, start_quote_index: int, container_type: str) -> bool:
+    end_quote_index = _find_unescaped_quote_end(raw, start_quote_index)
+    if end_quote_index is None:
+        return False
+    next_index = _next_non_whitespace_index(raw, end_quote_index + 1)
+    if next_index >= len(raw):
+        return True
+    next_sig = raw[next_index]
+    if container_type == "object":
+        return next_sig == ":"
+    if next_sig == "]":
+        return True
+    if next_sig == ",":
+        return _looks_like_value_start_after_comma(raw, next_index + 1, container_type)
+    return False
+
+
+def _looks_like_value_start_after_comma(raw: str, start: int, container_type: str) -> bool:
+    next_index = _next_non_whitespace_index(raw, start)
+    if next_index >= len(raw):
+        return False
+    next_sig = raw[next_index]
+    if container_type == "object":
+        return next_sig == '"' and _quoted_token_looks_standalone_after_comma(raw, next_index, container_type)
+    if next_sig == '"':
+        return _quoted_token_looks_standalone_after_comma(raw, next_index, container_type)
+    if next_sig in {"{", "[", "-", "0", "1", "2", "3", "4", "5", "6", "7", "8", "9"}:
+        return True
+    if next_sig == "t":
+        return _literal_has_boundary(raw, next_index, "true")
+    if next_sig == "f":
+        return _literal_has_boundary(raw, next_index, "false")
+    if next_sig == "n":
+        return _literal_has_boundary(raw, next_index, "null")
+    return False
+
+
+def _quote_terminates_string(raw: str, quote_index: int, string_role: str, container_type: str) -> bool:
+    next_index = _next_non_whitespace_index(raw, quote_index + 1)
+    next_sig = raw[next_index] if next_index < len(raw) else ""
+    if string_role == "object_key":
+        return next_sig == ":"
+    if next_sig in {"", "}", "]"}:
+        return True
+    if next_sig == ":":
+        return False
+    if next_sig == ",":
+        return _looks_like_value_start_after_comma(raw, next_index + 1, container_type)
+    return False
+
+
+def _after_value_state(context_stack: list[str]) -> str:
+    if not context_stack:
+        return "root_done"
+    return "object_comma_or_end" if context_stack[-1] == "object" else "array_comma_or_end"
+
+
+def _validate_required_keys(parsed: dict, required_keys: set[str] | None) -> dict:
+    if not required_keys:
+        return parsed
+    missing = sorted(key for key in required_keys if key not in parsed)
+    if missing:
+        raise ValueError(f"model JSON missing required keys: {', '.join(missing)}")
+    return parsed
+
+
+def _escape_unescaped_inner_quotes(raw: str) -> str:
+    """Escape stray quotes that appear inside JSON strings."""
+    repaired: list[str] = []
+    context_stack: list[str] = []
+    state = "root_value"
+    in_string = False
+    string_role = "value"
+    escape = False
+    in_scalar = False
+
+    index = 0
+    while index < len(raw):
+        char = raw[index]
+        if escape:
+            repaired.append(char)
+            escape = False
+            index += 1
+            continue
+
+        if in_scalar:
+            if char in " \t\r\n":
+                repaired.append(char)
+                in_scalar = False
+                state = _after_value_state(context_stack)
+                index += 1
+                continue
+            if char in ",}]":
+                in_scalar = False
+                state = _after_value_state(context_stack)
+                continue
+            repaired.append(char)
+            index += 1
+            continue
+
+        if in_string and char == "\\":
+            repaired.append(char)
+            escape = True
+            index += 1
+            continue
+
+        if in_string:
+            if char != '"':
+                repaired.append(char)
+                index += 1
+                continue
+            container_type = context_stack[-1] if context_stack else "root"
+            if _quote_terminates_string(raw, index, string_role, container_type):
+                in_string = False
+                repaired.append(char)
+                state = "object_colon" if string_role == "object_key" else _after_value_state(context_stack)
+            else:
+                repaired.append('\\"')
+            index += 1
+            continue
+
+        if char in " \t\r\n":
+            repaired.append(char)
+            index += 1
+            continue
+
+        repaired.append(char)
+
+        if state == "root_value":
+            if char == '"':
+                in_string = True
+                string_role = "value"
+            elif char == "{":
+                context_stack.append("object")
+                state = "object_key_or_end"
+            elif char == "[":
+                context_stack.append("array")
+                state = "array_value_or_end"
+            else:
+                in_scalar = True
+        elif state == "object_key_or_end":
+            if char == "}":
+                if context_stack:
+                    context_stack.pop()
+                state = _after_value_state(context_stack)
+            elif char == '"':
+                in_string = True
+                string_role = "object_key"
+        elif state == "object_key":
+            if char == '"':
+                in_string = True
+                string_role = "object_key"
+        elif state == "object_colon":
+            if char == ":":
+                state = "object_value"
+        elif state == "object_value":
+            if char == '"':
+                in_string = True
+                string_role = "value"
+            elif char == "{":
+                context_stack.append("object")
+                state = "object_key_or_end"
+            elif char == "[":
+                context_stack.append("array")
+                state = "array_value_or_end"
+            else:
+                in_scalar = True
+        elif state == "object_comma_or_end":
+            if char == ",":
+                state = "object_key"
+            elif char == "}":
+                if context_stack:
+                    context_stack.pop()
+                state = _after_value_state(context_stack)
+        elif state == "array_value_or_end":
+            if char == "]":
+                if context_stack:
+                    context_stack.pop()
+                state = _after_value_state(context_stack)
+            elif char == '"':
+                in_string = True
+                string_role = "value"
+            elif char == "{":
+                context_stack.append("object")
+                state = "object_key_or_end"
+            elif char == "[":
+                context_stack.append("array")
+                state = "array_value_or_end"
+            else:
+                in_scalar = True
+        elif state == "array_value":
+            if char == '"':
+                in_string = True
+                string_role = "value"
+            elif char == "{":
+                context_stack.append("object")
+                state = "object_key_or_end"
+            elif char == "[":
+                context_stack.append("array")
+                state = "array_value_or_end"
+            else:
+                in_scalar = True
+        elif state == "array_comma_or_end":
+            if char == ",":
+                state = "array_value"
+            elif char == "]":
+                if context_stack:
+                    context_stack.pop()
+                state = _after_value_state(context_stack)
+
+        index += 1
+
+    return "".join(repaired)
+
+
+def parse_model_json(raw: str, required_keys: set[str] | None = None) -> dict:
+    """Parse model JSON while tolerating literal control characters in strings."""
+    cleaned = extract_json(raw)
+    try:
+        return _validate_required_keys(json.loads(cleaned, strict=False), required_keys)
+    except json.JSONDecodeError:
+        repaired = _escape_unescaped_inner_quotes(cleaned)
+        if repaired != cleaned:
+            logger.warning("repairing model JSON by escaping stray inner quotes")
+            return _validate_required_keys(json.loads(repaired, strict=False), required_keys)
+        raise
+
+
 def compute_max_tokens(settings: Settings, chapter_count: int) -> int:
     """Dynamic max_tokens based on chapter count."""
     return max(settings.summarizer_max_tokens, 1024 * chapter_count + 1024)
@@ -142,7 +400,8 @@ _CHAPTER_SYNTHESIS_SYSTEM = (
     '  "summary_en": "<2-4 sentence English summary>",\n'
     '  "summary_zh": "<2-4 sentence Chinese summary>",\n'
     '  "key_points": ["point 1", "point 2", ...]\n'
-    "Output ONLY the JSON object. No explanation, no markdown fences."
+    "Output ONLY the JSON object. No explanation, no markdown fences.\n"
+    "Use valid JSON escaping for every string value."
 )
 
 
@@ -161,7 +420,8 @@ _OVERALL_SYNTHESIS_SYSTEM = (
     '  "summary_en": "<3-5 sentence English summary of the entire video>",\n'
     '  "summary_zh": "<3-5 sentence Chinese summary of the entire video>",\n'
     '  "highlights": ["highlight 1", "highlight 2", "highlight 3"]\n'
-    "Output ONLY the JSON object. No explanation, no markdown fences."
+    "Output ONLY the JSON object. No explanation, no markdown fences.\n"
+    "Use valid JSON escaping for every string value."
 )
 
 
@@ -246,7 +506,7 @@ class MlxQwenSummaryGenerator:
             _CHAPTER_SYNTHESIS_SYSTEM, user_msg, max_tokens=self._step_tokens(),
             artifact_dir=artifact_dir, artifact_label="chapter_synthesis",
         )
-        return json.loads(extract_json(raw))
+        return parse_model_json(raw, required_keys={"start_s", "end_s", "title", "summary_en", "summary_zh", "key_points"})
 
     def _synthesize_overall(self, source_metadata: dict,
                             chapter_summaries: list[dict],
@@ -256,7 +516,7 @@ class MlxQwenSummaryGenerator:
             _OVERALL_SYNTHESIS_SYSTEM, user_msg, max_tokens=self._step_tokens(),
             artifact_dir=artifact_dir, artifact_label="overall_synthesis",
         )
-        return json.loads(extract_json(raw))
+        return parse_model_json(raw, required_keys={"summary_en", "summary_zh", "highlights"})
 
     def summarize(
         self,
@@ -267,6 +527,7 @@ class MlxQwenSummaryGenerator:
         artifact_dir: Optional[Path] = None,
         progress_callback: Optional[Callable[[str], None]] = None,
     ) -> dict:
+        fallback = RuleBasedSummaryGenerator(self.settings)
         try:
             self._ensure_model_loaded()
             max_input_chars = self.settings.summarizer_max_input_chars
@@ -289,23 +550,54 @@ class MlxQwenSummaryGenerator:
                     notes = []
                     for c_idx, seg_chunk in enumerate(seg_chunks):
                         text = segments_to_text(seg_chunk)
-                        note = self._summarize_chunk(
-                            text, chapter.get("title_hint", ""),
-                            c_idx, len(seg_chunks), artifact_dir=ch_artifact,
-                        )
+                        try:
+                            note = self._summarize_chunk(
+                                text, chapter.get("title_hint", ""),
+                                c_idx, len(seg_chunks), artifact_dir=ch_artifact,
+                            )
+                        except Exception as exc:
+                            logger.warning(
+                                "mlx chunk note failed for chapter=%d chunk=%d (%s: %s), using raw chunk text",
+                                ch_idx,
+                                c_idx,
+                                type(exc).__name__,
+                                exc,
+                            )
+                            note = text
                         notes.append(note)
                     all_chunk_notes[ch_idx] = notes
 
                 if progress_callback:
                     progress_callback("synthesizing_chapters")
 
-                ch_summary = self._synthesize_chapter(chapter, notes, artifact_dir=ch_artifact)
+                try:
+                    ch_summary = self._synthesize_chapter(chapter, notes, artifact_dir=ch_artifact)
+                except Exception as exc:
+                    logger.warning(
+                        "mlx chapter synthesis failed for chapter=%d (%s: %s), using rule-based chapter fallback",
+                        ch_idx,
+                        type(exc).__name__,
+                        exc,
+                    )
+                    ch_summary = fallback.summarize_chapter(chapter, ch_idx + 1)
                 chapter_summaries.append(ch_summary)
 
             if progress_callback:
                 progress_callback("synthesizing_overall")
 
-            overall = self._synthesize_overall(source_metadata, chapter_summaries, artifact_dir=artifact_dir)
+            try:
+                overall = self._synthesize_overall(source_metadata, chapter_summaries, artifact_dir=artifact_dir)
+            except Exception as exc:
+                logger.warning(
+                    "mlx overall synthesis failed (%s: %s), using rule-based overall fallback",
+                    type(exc).__name__,
+                    exc,
+                )
+                overall = fallback.summarize_overall(
+                    source_metadata=source_metadata,
+                    transcript_segments=transcript_segments,
+                    chapter_summaries=chapter_summaries,
+                )
 
             # Save chunk notes artifact.
             if artifact_dir and all_chunk_notes:
@@ -320,7 +612,7 @@ class MlxQwenSummaryGenerator:
         except Exception as exc:
             logger.warning("MLX hierarchical summarizer failed (%s: %s), falling back to rule-based",
                            type(exc).__name__, exc)
-            return RuleBasedSummaryGenerator(self.settings).summarize(
+            return fallback.summarize(
                 source_metadata=source_metadata,
                 transcript_segments=transcript_segments,
                 chapters=chapters,
@@ -447,7 +739,7 @@ class OmlxSummaryGenerator:
             _CHAPTER_SYNTHESIS_SYSTEM, user_msg, max_tokens=self._step_tokens(),
             artifact_dir=artifact_dir, artifact_label="chapter_synthesis",
         )
-        return json.loads(extract_json(raw))
+        return parse_model_json(raw, required_keys={"start_s", "end_s", "title", "summary_en", "summary_zh", "key_points"})
 
     def _synthesize_overall(self, source_metadata: dict,
                             chapter_summaries: list[dict],
@@ -457,7 +749,7 @@ class OmlxSummaryGenerator:
             _OVERALL_SYNTHESIS_SYSTEM, user_msg, max_tokens=self._step_tokens(),
             artifact_dir=artifact_dir, artifact_label="overall_synthesis",
         )
-        return json.loads(extract_json(raw))
+        return parse_model_json(raw, required_keys={"summary_en", "summary_zh", "highlights"})
 
     def summarize(
         self,
@@ -468,6 +760,7 @@ class OmlxSummaryGenerator:
         artifact_dir: Optional[Path] = None,
         progress_callback: Optional[Callable[[str], None]] = None,
     ) -> dict:
+        fallback = RuleBasedSummaryGenerator(self.settings)
         try:
             max_input_chars = self.settings.summarizer_max_input_chars
             all_chunk_notes: dict[int, list[str]] = {}
@@ -487,23 +780,54 @@ class OmlxSummaryGenerator:
                     notes = []
                     for c_idx, seg_chunk in enumerate(seg_chunks):
                         text = segments_to_text(seg_chunk)
-                        note = self._summarize_chunk(
-                            text, chapter.get("title_hint", ""),
-                            c_idx, len(seg_chunks), artifact_dir=ch_artifact,
-                        )
+                        try:
+                            note = self._summarize_chunk(
+                                text, chapter.get("title_hint", ""),
+                                c_idx, len(seg_chunks), artifact_dir=ch_artifact,
+                            )
+                        except Exception as exc:
+                            logger.warning(
+                                "omlx chunk note failed for chapter=%d chunk=%d (%s: %s), using raw chunk text",
+                                ch_idx,
+                                c_idx,
+                                type(exc).__name__,
+                                exc,
+                            )
+                            note = text
                         notes.append(note)
                     all_chunk_notes[ch_idx] = notes
 
                 if progress_callback:
                     progress_callback("synthesizing_chapters")
 
-                ch_summary = self._synthesize_chapter(chapter, notes, artifact_dir=ch_artifact)
+                try:
+                    ch_summary = self._synthesize_chapter(chapter, notes, artifact_dir=ch_artifact)
+                except Exception as exc:
+                    logger.warning(
+                        "omlx chapter synthesis failed for chapter=%d (%s: %s), using rule-based chapter fallback",
+                        ch_idx,
+                        type(exc).__name__,
+                        exc,
+                    )
+                    ch_summary = fallback.summarize_chapter(chapter, ch_idx + 1)
                 chapter_summaries.append(ch_summary)
 
             if progress_callback:
                 progress_callback("synthesizing_overall")
 
-            overall = self._synthesize_overall(source_metadata, chapter_summaries, artifact_dir=artifact_dir)
+            try:
+                overall = self._synthesize_overall(source_metadata, chapter_summaries, artifact_dir=artifact_dir)
+            except Exception as exc:
+                logger.warning(
+                    "omlx overall synthesis failed (%s: %s), using rule-based overall fallback",
+                    type(exc).__name__,
+                    exc,
+                )
+                overall = fallback.summarize_overall(
+                    source_metadata=source_metadata,
+                    transcript_segments=transcript_segments,
+                    chapter_summaries=chapter_summaries,
+                )
 
             if artifact_dir and all_chunk_notes:
                 artifact_dir.mkdir(parents=True, exist_ok=True)
@@ -517,7 +841,7 @@ class OmlxSummaryGenerator:
         except Exception as exc:
             logger.warning("omlx hierarchical summarizer failed (%s: %s), falling back to rule-based",
                            type(exc).__name__, exc)
-            return RuleBasedSummaryGenerator(self.settings).summarize(
+            return fallback.summarize(
                 source_metadata=source_metadata,
                 transcript_segments=transcript_segments,
                 chapters=chapters,
@@ -546,30 +870,50 @@ class RuleBasedSummaryGenerator:
         progress_callback: Optional[Callable[[str], None]] = None,
     ) -> dict:
         chapter_summaries = []
-        all_text = " ".join(segment["text"] for segment in transcript_segments)
         for index, chapter in enumerate(chapters, start=1):
-            sentences = self._extract_sentences(chapter["text"], limit=2)
-            summary_en = " ".join(sentences) if sentences else chapter["title_hint"]
-            chapter_summaries.append(
-                {
-                    "start_s": chapter["start_s"],
-                    "end_s": chapter["end_s"],
-                    "title": chapter["title_hint"] or f"Chapter {index}",
-                    "summary_en": summary_en,
-                    "summary_zh": f"第{index}部分：{summary_en}",
-                    "key_points": sentences or [chapter["title_hint"]],
-                }
-            )
+            chapter_summaries.append(self.summarize_chapter(chapter, index))
 
-        overall_sentences = self._extract_sentences(all_text, limit=3)
-        overall_en = " ".join(overall_sentences) if overall_sentences else source_metadata.get("title", "Summary unavailable.")
+        overall = self.summarize_overall(
+            source_metadata=source_metadata,
+            transcript_segments=transcript_segments,
+        )
         return {
             "chapters": chapter_summaries,
-            "overall_summary": {
-                "summary_en": overall_en,
-                "summary_zh": f"整体总结：{overall_en}",
-                "highlights": overall_sentences or [source_metadata.get("title", "Untitled video")],
-            },
+            "overall_summary": overall,
+        }
+
+    def summarize_chapter(self, chapter: dict, index: int) -> dict:
+        sentences = self._extract_sentences(chapter["text"], limit=2)
+        summary_en = " ".join(sentences) if sentences else chapter["title_hint"]
+        return {
+            "start_s": chapter["start_s"],
+            "end_s": chapter["end_s"],
+            "title": chapter["title_hint"] or f"Chapter {index}",
+            "summary_en": summary_en,
+            "summary_zh": f"第{index}部分：{summary_en}",
+            "key_points": sentences or [chapter["title_hint"]],
+        }
+
+    def summarize_overall(
+        self,
+        source_metadata: dict,
+        transcript_segments: list[dict],
+        chapter_summaries: list[dict] | None = None,
+    ) -> dict:
+        if chapter_summaries:
+            all_text = " ".join(chapter.get("summary_en", "") for chapter in chapter_summaries)
+        else:
+            all_text = " ".join(segment["text"] for segment in transcript_segments)
+        overall_sentences = self._extract_sentences(all_text, limit=3)
+        overall_en = (
+            " ".join(overall_sentences)
+            if overall_sentences
+            else source_metadata.get("title", "Summary unavailable.")
+        )
+        return {
+            "summary_en": overall_en,
+            "summary_zh": f"整体总结：{overall_en}",
+            "highlights": overall_sentences or [source_metadata.get("title", "Untitled video")],
         }
 
     def _extract_sentences(self, text: str, limit: int) -> list[str]:
