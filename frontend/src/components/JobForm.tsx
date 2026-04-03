@@ -1,12 +1,26 @@
 import { useState } from "react";
+import type { JobOptions } from "../types/api";
 
 interface JobFormProps {
-  onSubmit: (payload: { url: string; output_languages: string[]; mode: "captions_first" }) => void;
+  onSubmit: (payload: { url: string; output_languages: string[]; mode: "captions_first"; options?: JobOptions }) => void;
   isPending: boolean;
 }
 
 export function JobForm({ onSubmit, isPending }: JobFormProps) {
   const [url, setUrl] = useState("");
+  const [showOptions, setShowOptions] = useState(false);
+  const [enableStudyPack, setEnableStudyPack] = useState<boolean | null>(null);
+  const [enableNormalization, setEnableNormalization] = useState<boolean | null>(null);
+
+  const buildOptions = (): JobOptions | undefined => {
+    if (!showOptions) return undefined;
+    // When the options panel is expanded, always send explicit values
+    // so the visual toggle state matches the actual behavior.
+    return {
+      enable_study_pack: enableStudyPack === true,
+      enable_transcript_normalization: enableNormalization !== false,
+    };
+  };
 
   return (
     <form
@@ -17,6 +31,7 @@ export function JobForm({ onSubmit, isPending }: JobFormProps) {
           url,
           output_languages: ["en", "zh-CN"],
           mode: "captions_first",
+          options: buildOptions(),
         });
       }}
     >
@@ -39,6 +54,37 @@ export function JobForm({ onSubmit, isPending }: JobFormProps) {
           required
         />
       </label>
+
+      <button
+        type="button"
+        className="options-toggle"
+        onClick={() => setShowOptions(!showOptions)}
+      >
+        {showOptions ? "Hide options" : "Options"}
+      </button>
+
+      {showOptions && (
+        <div className="options-panel">
+          <label className="toggle-row">
+            <span>Generate study guide</span>
+            <input
+              type="checkbox"
+              className="toggle-switch"
+              checked={enableStudyPack === true}
+              onChange={(e) => setEnableStudyPack(e.target.checked)}
+            />
+          </label>
+          <label className="toggle-row">
+            <span>Normalize transcript</span>
+            <input
+              type="checkbox"
+              className="toggle-switch"
+              checked={enableNormalization !== false}
+              onChange={(e) => setEnableNormalization(e.target.checked)}
+            />
+          </label>
+        </div>
+      )}
 
       <button className="primary-button" type="submit" disabled={isPending}>
         {isPending ? "Submitting..." : "Create summary job"}

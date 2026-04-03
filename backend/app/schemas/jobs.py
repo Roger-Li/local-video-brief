@@ -4,10 +4,16 @@ from pydantic import BaseModel, Field, HttpUrl
 from typing import Any, Dict, List, Optional
 
 
+class JobOptions(BaseModel):
+    enable_study_pack: Optional[bool] = None
+    enable_transcript_normalization: Optional[bool] = None
+
+
 class CreateJobRequest(BaseModel):
     url: HttpUrl
     output_languages: List[str] = Field(default_factory=lambda: ["en", "zh-CN"])
     mode: str = "captions_first"
+    options: Optional[JobOptions] = None
 
 
 class CreateJobResponse(BaseModel):
@@ -47,6 +53,7 @@ class JobStatusResponse(BaseModel):
     provider: Optional[str] = None
     detected_language: Optional[str] = None
     error: Optional[str] = None
+    options: Optional[Dict[str, Any]] = None
     created_at: str
     updated_at: str
 

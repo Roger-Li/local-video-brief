@@ -115,6 +115,17 @@ OVS_TEST_SUMMARIZER_PROVIDER=omlx OVS_OMLX_BASE_URL=http://localhost:8080/v1 OVS
 - Artifacts: `study_pack.json`, `study_guide.md` persisted under `artifacts/<job-id>/`.
 - API: `study_pack: null` in response when disabled or absent.
 
+## Per-Job Options
+
+- Optional per-job overrides via `options` field on `CreateJobRequest`. When omitted, all settings fall back to server defaults — fully backward compatible.
+- `JobOptions` Pydantic model in `schemas/jobs.py` with two optional boolean fields: `enable_study_pack`, `enable_transcript_normalization`.
+- Stored as JSON in `options TEXT` column on `jobs` table. `exclude_none=True` on serialization so only explicitly-set options are persisted.
+- `resolve_job_setting(job_options, key, settings)` helper in `config.py`: checks job options first, falls back to global `Settings`.
+- Pipeline reads `job.options` at start of `process_job()` and resolves `enable_transcript_normalization` and `enable_study_pack` per-job.
+- `JobStatusResponse` echoes back the resolved options so the frontend can display them.
+- Frontend: collapsible "Options" section in `JobForm.tsx` below the URL field. Two toggles: "Generate study guide" and "Normalize transcript". `null` state = "use server default".
+- `summarizer_provider` is **not** per-job in v1 — the MLX provider loads a multi-GB model into GPU memory at startup; dynamic switching requires a provider pool (deferred to v2).
+
 ## Known Limitations
 
 - Provider rate limits can still block extraction entirely.

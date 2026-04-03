@@ -31,6 +31,7 @@ class JobRecord:
     transcript_segments: List[Dict[str, Any]] = field(default_factory=list)
     result_payload: Optional[Dict[str, Any]] = None
     artifacts: Dict[str, Any] = field(default_factory=dict)
+    options: Dict[str, Any] = field(default_factory=dict)
     error: Optional[str] = None
     created_at: str = field(default_factory=utc_now)
     updated_at: str = field(default_factory=utc_now)

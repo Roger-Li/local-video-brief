@@ -1,9 +1,15 @@
 export type JobStatus = "queued" | "running" | "completed" | "failed";
 
+export interface JobOptions {
+  enable_study_pack?: boolean;
+  enable_transcript_normalization?: boolean;
+}
+
 export interface CreateJobRequest {
   url: string;
   output_languages?: string[];
   mode?: "captions_first";
+  options?: JobOptions;
 }
 
 export interface CreateJobResponse {
@@ -19,6 +25,7 @@ export interface JobStatusResponse {
   provider?: string | null;
   detected_language?: string | null;
   error?: string | null;
+  options?: Record<string, unknown> | null;
   created_at: string;
   updated_at: string;
 }

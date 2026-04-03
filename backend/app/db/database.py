@@ -34,4 +34,9 @@ def initialize_database(connection: sqlite3.Connection) -> None:
         """
     )
     connection.commit()
+    try:
+        connection.execute("ALTER TABLE jobs ADD COLUMN options TEXT DEFAULT '{}'")
+        connection.commit()
+    except sqlite3.OperationalError:
+        pass  # Column already exists
 

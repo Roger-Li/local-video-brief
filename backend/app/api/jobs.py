@@ -16,10 +16,12 @@ router = APIRouter(prefix="/jobs", tags=["jobs"])
 @router.post("", response_model=CreateJobResponse, status_code=status.HTTP_201_CREATED)
 def create_job(payload: CreateJobRequest, request: Request) -> CreateJobResponse:
     repository = request.app.state.job_repository
+    options_dict = payload.options.model_dump(exclude_none=True) if payload.options else {}
     job = repository.create_job(
         url=str(payload.url),
         output_languages=payload.output_languages,
         mode=payload.mode,
+        options=options_dict,
     )
     return CreateJobResponse(job_id=job.id, status=job.status)
 
@@ -38,6 +40,7 @@ def get_job(job_id: str, request: Request) -> JobStatusResponse:
         provider=job.provider,
         detected_language=job.detected_language,
         error=job.error,
+        options=job.options or None,
         created_at=job.created_at,
         updated_at=job.updated_at,
     )

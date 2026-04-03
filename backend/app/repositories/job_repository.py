@@ -12,15 +12,16 @@ class JobRepository:
     def __init__(self, connection: sqlite3.Connection) -> None:
         self.connection = connection
 
-    def create_job(self, url: str, output_languages: List[str], mode: str) -> JobRecord:
-        job = JobRecord(id=str(uuid.uuid4()), url=url, output_languages=output_languages, mode=mode)
+    def create_job(self, url: str, output_languages: List[str], mode: str, options: Optional[dict] = None) -> JobRecord:
+        opts = options or {}
+        job = JobRecord(id=str(uuid.uuid4()), url=url, output_languages=output_languages, mode=mode, options=opts)
         self.connection.execute(
             """
             INSERT INTO jobs (
                 id, url, mode, output_languages, status, progress_stage, provider,
                 detected_language, source_metadata, transcript_segments, result_payload,
-                artifacts, error, created_at, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                artifacts, error, created_at, updated_at, options
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 job.id,
@@ -38,6 +39,7 @@ class JobRepository:
                 None,
                 job.created_at,
                 job.updated_at,
+                json.dumps(opts),
             ),
         )
         self.connection.commit()
@@ -88,7 +90,7 @@ class JobRepository:
         return self.get_job(job["id"])
 
     def update_job(self, job_id: str, **fields: object) -> JobRecord:
-        allowed_json_fields = {"output_languages", "source_metadata", "transcript_segments", "result_payload", "artifacts"}
+        allowed_json_fields = {"output_languages", "source_metadata", "transcript_segments", "result_payload", "artifacts", "options"}
         parts: list[str] = []
         values: list[object] = []
         for key, value in fields.items():
@@ -118,6 +120,7 @@ class JobRepository:
             transcript_segments=json.loads(row["transcript_segments"] or "[]"),
             result_payload=json.loads(row["result_payload"]) if row["result_payload"] else None,
             artifacts=json.loads(row["artifacts"] or "{}"),
+            options=json.loads(row["options"] or "{}"),
             error=row["error"],
             created_at=row["created_at"],
             updated_at=row["updated_at"],

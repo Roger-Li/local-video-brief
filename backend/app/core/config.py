@@ -4,7 +4,7 @@ from dataclasses import dataclass, field
 from functools import lru_cache
 import os
 from pathlib import Path
-from typing import Iterable, List
+from typing import Any, Iterable, List
 
 
 def _parse_dotenv_line(line: str) -> tuple[str, str] | None:
@@ -127,3 +127,10 @@ class Settings:
 @lru_cache(maxsize=1)
 def get_settings() -> Settings:
     return Settings()
+
+
+def resolve_job_setting(job_options: dict, key: str, settings: Settings) -> Any:
+    """Return job_options[key] if present, else getattr(settings, key)."""
+    if key in job_options:
+        return job_options[key]
+    return getattr(settings, key)
