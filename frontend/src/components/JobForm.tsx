@@ -14,12 +14,10 @@ export function JobForm({ onSubmit, isPending }: JobFormProps) {
 
   const buildOptions = (): JobOptions | undefined => {
     if (!showOptions) return undefined;
-    // When the options panel is expanded, always send explicit values
-    // so the visual toggle state matches the actual behavior.
-    return {
-      enable_study_pack: enableStudyPack === true,
-      enable_transcript_normalization: enableNormalization !== false,
-    };
+    const opts: JobOptions = {};
+    if (enableStudyPack !== null) opts.enable_study_pack = enableStudyPack;
+    if (enableNormalization !== null) opts.enable_transcript_normalization = enableNormalization;
+    return Object.keys(opts).length > 0 ? opts : undefined;
   };
 
   return (

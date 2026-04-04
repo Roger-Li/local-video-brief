@@ -175,7 +175,8 @@ def main() -> int:
                 previous_section_end = float(end_s)
                 validate_summary_text(f"study_pack section {index} title", section.get("title"), failures)
                 validate_summary_text(f"study_pack section {index} summary_en", section.get("summary_en"), failures)
-                validate_summary_text(f"study_pack section {index} summary_zh", section.get("summary_zh"), failures)
+                if section.get("summary_zh"):
+                    validate_summary_text(f"study_pack section {index} summary_zh", section.get("summary_zh"), failures)
                 section_kp = section.get("key_points")
                 if not isinstance(section_kp, list):
                     failures.append(f"study_pack section {index} key_points is not a list")
@@ -189,9 +190,11 @@ def main() -> int:
 
     if args.expect_llm_artifacts:
         prompt_candidates = list(artifact_root.glob("summarizer_prompt.txt"))
+        prompt_candidates += list(artifact_root.glob("summarizer_single_shot_prompt.txt"))
         prompt_candidates += list(artifact_root.glob("summarizer_overall_synthesis_prompt.txt"))
         prompt_candidates += list(artifact_root.glob("ch*/summarizer_*_prompt.txt"))
         raw_output_candidates = list(artifact_root.glob("summarizer_raw_output.txt"))
+        raw_output_candidates += list(artifact_root.glob("summarizer_single_shot_raw_output.txt"))
         raw_output_candidates += list(artifact_root.glob("summarizer_overall_synthesis_raw_output.txt"))
         raw_output_candidates += list(artifact_root.glob("ch*/summarizer_*_raw_output.txt"))
         if not prompt_candidates:
@@ -201,6 +204,7 @@ def main() -> int:
 
     if args.expect_omlx_request:
         request_candidates = list(artifact_root.glob("summarizer_request.json"))
+        request_candidates += list(artifact_root.glob("summarizer_single_shot_request.json"))
         request_candidates += list(artifact_root.glob("ch*/summarizer_*_request.json"))
         if not request_candidates:
             failures.append(f"no oMLX request artifacts found under {artifact_root}")

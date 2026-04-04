@@ -60,26 +60,25 @@ describe("JobForm", () => {
 
     expect(onSubmit).toHaveBeenCalledWith(
       expect.objectContaining({
-        options: { enable_study_pack: true, enable_transcript_normalization: true },
+        options: { enable_study_pack: true },
       }),
     );
   });
 
-  it("expanded panel with defaults sends explicit false/true", () => {
+  it("expanded panel with untouched toggles sends no options", () => {
     const onSubmit = vi.fn();
     render(<JobForm onSubmit={onSubmit} isPending={false} />);
 
-    // Expand options but don't touch any toggles
+    // Expand options but don't touch any toggles — both remain null (server default)
     fireEvent.click(screen.getByText("Options"));
 
     const input = screen.getByPlaceholderText(/youtube/i);
     fireEvent.change(input, { target: { value: "https://www.youtube.com/watch?v=test" } });
     fireEvent.submit(input.closest("form")!);
 
-    // Both explicit: study pack off, normalization on
     expect(onSubmit).toHaveBeenCalledWith(
       expect.objectContaining({
-        options: { enable_study_pack: false, enable_transcript_normalization: true },
+        options: undefined,
       }),
     );
   });
@@ -99,7 +98,7 @@ describe("JobForm", () => {
 
     expect(onSubmit).toHaveBeenCalledWith(
       expect.objectContaining({
-        options: { enable_study_pack: false, enable_transcript_normalization: false },
+        options: { enable_transcript_normalization: false },
       }),
     );
   });
