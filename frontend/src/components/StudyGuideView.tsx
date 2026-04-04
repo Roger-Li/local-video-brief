@@ -44,8 +44,8 @@ export function StudyGuideView({ studyPack, title }: StudyGuideViewProps) {
         <div>
           <h3>Sections</h3>
           <div className="chapter-list">
-            {studyPack.sections.map((section) => (
-              <div className="study-section-card" key={section.chapter_index}>
+            {studyPack.sections.map((section, idx) => (
+              <div className="study-section-card" key={`${section.chapter_index}-${idx}`}>
                 <div className="chapter-timing">
                   {formatTimestamp(section.start_s)} – {formatTimestamp(section.end_s)}
                 </div>

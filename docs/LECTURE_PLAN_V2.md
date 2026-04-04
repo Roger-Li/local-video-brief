@@ -24,15 +24,14 @@
 - Per-step token limits derived from `settings.summarizer_max_tokens` (floor of 512 for chunk notes, 1024 for synthesis).
 - Per-chapter artifact subdirs with prompt/request/raw_output files.
 
-### v2 (proposed) — Hybrid Routing
+### v2 status: COMPLETED (2026-04-03). Hybrid routing implemented on both MLX and oMLX providers.
 
-The v1 hierarchical path runs unconditionally, adding N+1 LLM calls even for short videos where all text fits in one prompt. A hybrid approach would route based on total transcript size:
-
-- **Small** (total text ≤ threshold): Single-shot prompt with all chapters (1 LLM call, best coherence)
-- **Medium** (total text > threshold but each chapter fits): Per-chapter synthesis + overall (current v1 flow)
-- **Large** (individual chapters exceed threshold): Full hierarchical with chunk notes
-
-This reduces latency for short/medium videos while preserving coverage for long lectures. See `LECTURE_PLAN_V2_IMPLEMENTATION.md` for detailed routing logic and open questions.
+- `_choose_strategy()` selects single-shot / per-chapter / hierarchical based on total and per-chapter text size vs `summarizer_max_input_chars`.
+- **Small** (total text <= threshold): Single-shot prompt with all chapters (1 LLM call, best coherence).
+- **Medium** (total text > threshold but each chapter fits): Per-chapter synthesis + overall (N+1 calls).
+- **Large** (individual chapters exceed threshold): Full hierarchical with chunk notes (N+K+1 calls).
+- `summarizer_strategy.txt` artifact saved for debugging.
+- 133 tests pass (45 new). E2E validated on 15-min English video via oMLX.
 
 ## Phase B — Add A Minimal Study Pack
 
@@ -63,12 +62,27 @@ E2E testing against a 61-minute workshop (YouTube Live) and comparison with Gemi
 - ~~`_build_sections()` derives `start_s`/`end_s` from LLM chapter summaries rather than the authoritative `chapters` list~~ — **FIXED in v1** (authoritative chapter timestamps now used).
 - Section refinement deferred: v1 maps 1:1 chapter-to-section with no splitting of oversized chapters.
 
-**Proposed v2 scope:**
-- Render timestamps as `[MM:SS–MM:SS]` in the markdown template.
-- Rewrite `learning_objectives` as action verbs ("Understand how…", "Learn to…") — either via LLM or heuristic prefix transform.
-- Differentiate `final_takeaways` from `learning_objectives` (e.g., takeaways focus on actionable next steps).
-- Optional: split oversized chapters (>5 min and >450 words) into 2-3 sections targeting ~250-350 words each, capped at 10 sections total. Requires per-section LLM summarization from transcript slices.
-- Do not include `prerequisites`, `teaching_notes`, `core_terms`, `review_questions`, or `timestamp_refs` until the minimal path is stable.
+**v2 status: COMPLETED (2026-04-03).** Timestamps, differentiated objectives, and differentiated takeaways shipped. 133 tests pass.
+
+**What shipped in v2:**
+- `[MM:SS–MM:SS]` timestamp ranges rendered in `study_guide.md` section headings (backend + frontend export already had this).
+- `learning_objectives` rewritten with action verb prefixes ("Understand ...", "Learn about ...", "Explore ...", "Examine ...", "Discover ...") derived from chapter titles, not highlights.
+- `final_takeaways` now derived from unique chapter `key_points` (up to 5), falling back to highlights. Distinct from `learning_objectives`.
+- No-double-prefix guard: titles already starting with an action verb are not re-prefixed.
+- All changes deterministic (no LLM calls). Backward compatible — `study_pack` JSON schema unchanged.
+
+**v3 status: COMPLETED (2026-04-03).** Deterministic section refinement shipped. 157 tests pass (11 new).
+
+**What shipped in v3:**
+- Oversized chapters (>5 min AND >450 words) split into 2-3 sub-sections by word budget (~300 words/section), capped at 10 total sections.
+- Fully deterministic — first sub-section inherits LLM chapter summary; additional sub-sections extract representative sentences from transcript slices.
+- Sub-section titles append "(Part N)"; key_points distributed round-robin.
+- Frontend React key fixed to avoid duplicate keys when multiple sections share `chapter_index`.
+- E2E validated on 61-min workshop (4 chapters → 10 sections: 3 oversized chapters split into 3 sub-sections each + 1 short chapter pass-through).
+
+**Deferred:**
+- LLM-based per-section summarization for additional sub-sections (currently uses sentence extraction).
+- Speaker attribution, `prerequisites`, `teaching_notes`, `core_terms`, `review_questions`.
 
 ## Phase C — Frontend Study Guide And Export Path
 

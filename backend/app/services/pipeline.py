@@ -5,7 +5,7 @@ import logging
 import time
 from pathlib import Path
 
-from backend.app.core.config import Settings
+from backend.app.core.config import Settings, resolve_job_setting
 from backend.app.models.job import JobStatus
 
 logger = logging.getLogger(__name__)
@@ -44,6 +44,10 @@ class VideoSummaryPipeline:
 
         job_t0 = time.perf_counter()
         logger.info("pipeline START job=%s url=%s", job_id, job.url)
+
+        job_options = getattr(job, "options", None) or {}
+        enable_normalization = resolve_job_setting(job_options, "enable_transcript_normalization", self._settings)
+        enable_study_pack = resolve_job_setting(job_options, "enable_study_pack", self._settings)
 
         try:
             logger.info("stage=inspecting_source job=%s", job_id)
@@ -100,7 +104,7 @@ class VideoSummaryPipeline:
             logger.info("detected_language=%s total_segments=%d", detected_language, len(transcript_segments))
 
             raw_segments = transcript_segments
-            if self._settings.enable_transcript_normalization:
+            if enable_normalization:
                 logger.info("stage=normalizing_transcript job=%s raw_segments=%d", job_id, len(raw_segments))
                 t0 = time.perf_counter()
                 transcript_segments, norm_stats = self._normalizer.normalize(raw_segments)
@@ -171,7 +175,7 @@ class VideoSummaryPipeline:
             logger.info("stage=summarizing DONE job=%s (%.1fs)", job_id, time.perf_counter() - t0)
 
             # Study pack generation (optional, non-fatal).
-            if self._settings.enable_study_pack:
+            if enable_study_pack:
                 self.repository.update_job(job_id, progress_stage="generating_study_pack")
                 logger.info("stage=generating_study_pack job=%s", job_id)
                 t0 = time.perf_counter()

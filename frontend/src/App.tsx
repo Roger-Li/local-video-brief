@@ -36,7 +36,7 @@ export default function App() {
     <main className="app-shell">
       <div className="hero-background" />
       <section className="content-stack">
-        <JobForm onSubmit={(payload) => createJobMutation.mutate(payload)} isPending={createJobMutation.isPending} />
+        <JobForm onSubmit={(payload: CreateJobRequest) => createJobMutation.mutate(payload)} isPending={createJobMutation.isPending} />
 
         {createJobMutation.isError ? (
           <p className="error-banner">{(createJobMutation.error as Error).message}</p>
