@@ -373,6 +373,65 @@ def compute_max_tokens(settings: Settings, chapter_count: int) -> int:
 
 
 # ---------------------------------------------------------------------------
+# Routing strategy
+# ---------------------------------------------------------------------------
+
+_CHAPTER_REQUIRED_KEYS = {"start_s", "end_s", "title", "summary_en", "summary_zh", "key_points"}
+_OVERALL_REQUIRED_KEYS = {"summary_en", "summary_zh", "highlights"}
+
+# Prompt overhead margin: system prompt, schema example, metadata JSON, and
+# per-chapter JSON wrapping add roughly 2-3 KB on top of raw chapter text.
+# Using a 0.7 utilisation factor ensures near-threshold inputs route to per-chapter.
+_SINGLE_SHOT_UTILISATION = 0.7
+
+
+def _validate_single_shot_payload(parsed: dict, expected_chapters: int | None = None) -> dict:
+    """Validate each chapter and overall_summary in a single-shot response.
+
+    If *expected_chapters* is given, the response must contain exactly that
+    many chapter summaries — otherwise the LLM merged/dropped/invented chapters.
+    """
+    chapters = parsed.get("chapters", [])
+    if not isinstance(chapters, list):
+        raise ValueError("single-shot 'chapters' is not a list")
+    if expected_chapters is not None and len(chapters) != expected_chapters:
+        raise ValueError(
+            f"single-shot returned {len(chapters)} chapters, expected {expected_chapters}"
+        )
+    for i, ch in enumerate(chapters):
+        if not isinstance(ch, dict):
+            raise ValueError(f"single-shot chapter {i} is not a dict")
+        missing = sorted(k for k in _CHAPTER_REQUIRED_KEYS if k not in ch)
+        if missing:
+            raise ValueError(f"single-shot chapter {i} missing keys: {', '.join(missing)}")
+    overall = parsed.get("overall_summary", {})
+    if not isinstance(overall, dict):
+        raise ValueError("single-shot 'overall_summary' is not a dict")
+    missing = sorted(k for k in _OVERALL_REQUIRED_KEYS if k not in overall)
+    if missing:
+        raise ValueError(f"single-shot overall_summary missing keys: {', '.join(missing)}")
+    return parsed
+
+
+def _choose_strategy(chapters: list[dict], max_input_chars: int) -> str:
+    """Choose summarization strategy based on transcript size.
+
+    Returns one of: 'single_shot', 'per_chapter', 'hierarchical'.
+    """
+    total_chars = sum(len(ch.get("text", "")) for ch in chapters)
+    # Apply utilisation factor to account for prompt overhead (system prompt,
+    # schema example, metadata JSON, per-chapter JSON wrapping).
+    if total_chars <= int(max_input_chars * _SINGLE_SHOT_UTILISATION):
+        return "single_shot"
+    any_chapter_exceeds = any(
+        len(ch.get("text", "")) > max_input_chars for ch in chapters
+    )
+    if any_chapter_exceeds:
+        return "hierarchical"
+    return "per_chapter"
+
+
+# ---------------------------------------------------------------------------
 # Hierarchical summarization prompts
 # ---------------------------------------------------------------------------
 
@@ -518,6 +577,25 @@ class MlxQwenSummaryGenerator:
         )
         return parse_model_json(raw, required_keys={"summary_en", "summary_zh", "highlights"})
 
+    def _single_shot(
+        self,
+        source_metadata: dict,
+        chapters: list[dict],
+        output_languages: list[str],
+        artifact_dir: Optional[Path] = None,
+    ) -> dict:
+        """Single-shot summarization: all chapters in one prompt, one LLM call."""
+        system_msg, user_msg = build_summarizer_prompt(
+            self.settings, source_metadata, chapters, output_languages,
+        )
+        max_tokens = compute_max_tokens(self.settings, len(chapters))
+        raw = self._call_llm(
+            system_msg, user_msg, max_tokens=max_tokens,
+            artifact_dir=artifact_dir, artifact_label="single_shot",
+        )
+        parsed = parse_model_json(raw, required_keys={"chapters", "overall_summary"})
+        return _validate_single_shot_payload(parsed, expected_chapters=len(chapters))
+
     def summarize(
         self,
         source_metadata: dict,
@@ -531,6 +609,23 @@ class MlxQwenSummaryGenerator:
         try:
             self._ensure_model_loaded()
             max_input_chars = self.settings.summarizer_max_input_chars
+            strategy = _choose_strategy(chapters, max_input_chars)
+            logger.info("summarizer strategy=%s chapters=%d max_input_chars=%d",
+                        strategy, len(chapters), max_input_chars)
+
+            if artifact_dir:
+                artifact_dir.mkdir(parents=True, exist_ok=True)
+                (artifact_dir / "summarizer_strategy.txt").write_text(strategy, encoding="utf-8")
+
+            # --- Single-shot path ---
+            if strategy == "single_shot":
+                if progress_callback:
+                    progress_callback("summarizing_single_shot")
+                return self._single_shot(
+                    source_metadata, chapters, output_languages, artifact_dir=artifact_dir,
+                )
+
+            # --- Per-chapter / hierarchical paths ---
             all_chunk_notes: dict[int, list[str]] = {}
             chapter_summaries: list[dict] = []
 
@@ -606,11 +701,11 @@ class MlxQwenSummaryGenerator:
                     json.dumps(all_chunk_notes, ensure_ascii=False, indent=2), encoding="utf-8"
                 )
 
-            logger.info("hierarchical summarization complete: %d chapters", len(chapter_summaries))
+            logger.info("summarization complete: strategy=%s chapters=%d", strategy, len(chapter_summaries))
             return {"chapters": chapter_summaries, "overall_summary": overall}
 
         except Exception as exc:
-            logger.warning("MLX hierarchical summarizer failed (%s: %s), falling back to rule-based",
+            logger.warning("MLX summarizer failed (%s: %s), falling back to rule-based",
                            type(exc).__name__, exc)
             return fallback.summarize(
                 source_metadata=source_metadata,
@@ -751,6 +846,25 @@ class OmlxSummaryGenerator:
         )
         return parse_model_json(raw, required_keys={"summary_en", "summary_zh", "highlights"})
 
+    def _single_shot(
+        self,
+        source_metadata: dict,
+        chapters: list[dict],
+        output_languages: list[str],
+        artifact_dir: Optional[Path] = None,
+    ) -> dict:
+        """Single-shot summarization: all chapters in one prompt, one LLM call."""
+        system_msg, user_msg = build_summarizer_prompt(
+            self.settings, source_metadata, chapters, output_languages,
+        )
+        max_tokens = compute_max_tokens(self.settings, len(chapters))
+        raw = self._call_omlx(
+            system_msg, user_msg, max_tokens=max_tokens,
+            artifact_dir=artifact_dir, artifact_label="single_shot",
+        )
+        parsed = parse_model_json(raw, required_keys={"chapters", "overall_summary"})
+        return _validate_single_shot_payload(parsed, expected_chapters=len(chapters))
+
     def summarize(
         self,
         source_metadata: dict,
@@ -763,6 +877,23 @@ class OmlxSummaryGenerator:
         fallback = RuleBasedSummaryGenerator(self.settings)
         try:
             max_input_chars = self.settings.summarizer_max_input_chars
+            strategy = _choose_strategy(chapters, max_input_chars)
+            logger.info("omlx summarizer strategy=%s chapters=%d max_input_chars=%d",
+                        strategy, len(chapters), max_input_chars)
+
+            if artifact_dir:
+                artifact_dir.mkdir(parents=True, exist_ok=True)
+                (artifact_dir / "summarizer_strategy.txt").write_text(strategy, encoding="utf-8")
+
+            # --- Single-shot path ---
+            if strategy == "single_shot":
+                if progress_callback:
+                    progress_callback("summarizing_single_shot")
+                return self._single_shot(
+                    source_metadata, chapters, output_languages, artifact_dir=artifact_dir,
+                )
+
+            # --- Per-chapter / hierarchical paths ---
             all_chunk_notes: dict[int, list[str]] = {}
             chapter_summaries: list[dict] = []
 
@@ -835,11 +966,11 @@ class OmlxSummaryGenerator:
                     json.dumps(all_chunk_notes, ensure_ascii=False, indent=2), encoding="utf-8"
                 )
 
-            logger.info("omlx hierarchical summarization complete: %d chapters", len(chapter_summaries))
+            logger.info("omlx summarization complete: strategy=%s chapters=%d", strategy, len(chapter_summaries))
             return {"chapters": chapter_summaries, "overall_summary": overall}
 
         except Exception as exc:
-            logger.warning("omlx hierarchical summarizer failed (%s: %s), falling back to rule-based",
+            logger.warning("omlx summarizer failed (%s: %s), falling back to rule-based",
                            type(exc).__name__, exc)
             return fallback.summarize(
                 source_metadata=source_metadata,

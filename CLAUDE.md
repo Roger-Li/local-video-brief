@@ -81,20 +81,24 @@ OVS_TEST_SUMMARIZER_PROVIDER=omlx OVS_OMLX_BASE_URL=http://localhost:8080/v1 OVS
 - All providers fall back to rule-based output on failure. oMLX runtime failures (timeout, HTTP errors, bad JSON) trigger fallback; config errors (missing URL/model) fail at startup.
 - The rule-based fallback caps summaries at 500 chars to prevent transcript dumps when text lacks sentence punctuation.
 
-### Hierarchical Summarization (MLX + oMLX)
+### Hybrid Summarization Routing (MLX + oMLX)
 
-- Both LLM providers use a hierarchical per-chapter flow instead of a single monolithic prompt.
-- For each chapter: `chunk_segments()` groups transcript segments by `summarizer_max_input_chars` budget without splitting mid-segment.
+- Both LLM providers use hybrid routing via `_choose_strategy()` to select the simplest strategy that achieves full coverage:
+  - **Single-shot** (total chapter text <= `max_input_chars`): One prompt with all chapters via `build_summarizer_prompt()`, 1 LLM call. Best coherence for short videos.
+  - **Per-chapter** (total > threshold, each chapter <= threshold): `_synthesize_chapter()` per chapter + `_synthesize_overall()`, N+1 calls.
+  - **Hierarchical** (any chapter > threshold): Chunk notes + chapter synthesis + overall synthesis, N+K+1 calls.
+- `summarizer_strategy.txt` artifact saved at the start of each run for debugging.
+- For each chapter in per-chapter/hierarchical paths: `chunk_segments()` groups transcript segments by `summarizer_max_input_chars` budget without splitting mid-segment.
 - Single-chunk chapters go directly to `_synthesize_chapter()` (the raw segment text is passed as the "note").
 - Multi-chunk chapters first produce a plain-English note per chunk via `_summarize_chunk()`, then synthesize the chapter from those notes.
 - After all chapters: `_synthesize_overall()` produces the overall summary from chapter summaries.
 - Per-step token limits are derived from `settings.summarizer_max_tokens`: chunk notes get `max(512, max_tokens // 4)`, synthesis steps get `max(1024, max_tokens // 2)`.
 - `_call_llm()` / `_call_omlx()` are extracted helpers that handle chat template formatting, artifact saving, and generation for each LLM call.
-- `build_summarizer_prompt()` is retained for backward compatibility but is no longer on the main code path.
+- `build_summarizer_prompt()` is used for single-shot path; retained for backward compatibility.
 - Artifacts saved per chapter: `ch{N}/summarizer_chapter_synthesis_prompt.txt`, `ch{N}/summarizer_chapter_synthesis_raw_output.txt`, and (oMLX) `ch{N}/summarizer_chapter_synthesis_request.json`.
-- Root-level artifacts: `summarizer_overall_synthesis_prompt.txt`, `summarizer_overall_synthesis_raw_output.txt`.
+- Root-level artifacts: `summarizer_overall_synthesis_prompt.txt`, `summarizer_overall_synthesis_raw_output.txt`, or `summarizer_single_shot_prompt.txt` / `summarizer_single_shot_raw_output.txt` for single-shot.
 - `chunk_notes.json` is saved when any chapter has multiple chunks.
-- Progress sub-stages reported via `progress_callback`: `summarizing_chunks` → `synthesizing_chapters` → `synthesizing_overall`.
+- Progress sub-stages reported via `progress_callback`: `summarizing_single_shot` (single-shot) or `summarizing_chunks` → `synthesizing_chapters` → `synthesizing_overall` (multi-step).
 
 ### Text Utilities
 
@@ -108,9 +112,9 @@ OVS_TEST_SUMMARIZER_PROVIDER=omlx OVS_OMLX_BASE_URL=http://localhost:8080/v1 OVS
 - `StudyPackGenerator` in `services/study_pack.py`; `StudySection`, `StudyPack` Pydantic models in `schemas/jobs.py`.
 - Schema: `version`, `format`, `learning_objectives`, `sections[]` (one per chapter), `final_takeaways`.
 - Section `start_s`/`end_s` are derived from authoritative chapter data (not LLM output), preventing timestamp drift.
-- `learning_objectives`: up to 5 items from `overall_summary.highlights`, falling back to chapter titles.
-- `final_takeaways`: reuses `overall_summary.highlights`.
-- `render_study_guide_markdown()` produces standalone Markdown from `study_pack.json` via pure template rendering.
+- `learning_objectives`: up to 5 items derived from chapter titles with action verb prefixes ("Understand ...", "Learn about ...", etc.), falling back to highlights.
+- `final_takeaways`: up to 5 unique key_points collected across all chapters, falling back to highlights. Distinct from `learning_objectives`.
+- `render_study_guide_markdown()` produces standalone Markdown from `study_pack.json` via pure template rendering, including `[MM:SS–MM:SS]` timestamp ranges on each section heading.
 - Pipeline stage: `generating_study_pack` runs after summarizer, before `COMPLETED`. Failure-isolated — errors never fail the job.
 - Artifacts: `study_pack.json`, `study_guide.md` persisted under `artifacts/<job-id>/`.
 - API: `study_pack: null` in response when disabled or absent.
@@ -132,7 +136,7 @@ OVS_TEST_SUMMARIZER_PROVIDER=omlx OVS_OMLX_BASE_URL=http://localhost:8080/v1 OVS
 - There is no auth, cloud sync, OCR, diarization, or Q&A flow in this repo.
 - Transcript normalization handles most rolling-caption patterns but may leave residual duplication in edge cases.
 - The summarizer worker processes jobs sequentially; concurrent submissions queue up.
-- The hierarchical summarization path runs unconditionally on LLM providers — even short videos get N+1 LLM calls. A hybrid routing approach (single-shot for short videos, per-chapter for medium, full hierarchical for long) is proposed in `artifacts/plan/LECTURE_PLAN_V2_IMPLEMENTATION.md` as Phase A v2.
+- The study pack is fully deterministic (no LLM calls); section refinement (splitting oversized chapters into multiple sections) is deferred to a future version.
 - Chaptering splits purely on duration (8 min) and gap (45s) thresholds with no semantic awareness. Continuous lectures without natural pauses get uniform time-based chapters.
 
 ## Editing Guidance
@@ -144,9 +148,7 @@ OVS_TEST_SUMMARIZER_PROVIDER=omlx OVS_OMLX_BASE_URL=http://localhost:8080/v1 OVS
 
 ## Future Directions
 
-- **Study pack quality (Phase B v2)**: Add `[MM:SS]` timestamps to markdown, differentiate `learning_objectives` from `final_takeaways`, optional section refinement for oversized chapters. See `artifacts/plan/LECTURE_PLAN_V2.md`.
-- **Frontend study guide (Phase C)**: Tabbed result view (Summary | Study Guide | Transcript), `StudyGuideView` component, Markdown/HTML export. Depends on Phase B. See `artifacts/plan/LECTURE_PLAN_V2_IMPLEMENTATION.md`.
-- **Hybrid summarization routing (Phase A v2)**: Route short videos through single-shot prompt, medium through per-chapter synthesis, long/dense through full hierarchical with chunk notes. Reduces LLM calls for short videos while preserving coverage for long lectures.
+- **Study pack section refinement**: Split oversized chapters (>5 min and >450 words) into 2-3 sections targeting ~250-350 words each, capped at 10 sections total. Requires per-section LLM summarization from transcript slices.
 - **oMLX server for model hosting**: The `omlx` summarizer provider is implemented (v1, OpenAI-compatible, non-streaming). Future work: streaming support, retry-once for transient errors, and Anthropic-compatible endpoint support if needed.
 - **Browser-integrated summarization**: Build a browser extension (Chrome/Firefox WebExtension API) that detects YouTube/bilibili video pages, triggers summary jobs against the local backend, and displays results in a sidebar overlay. This requires the backend to be running locally and the extension to communicate via `localhost` API. A Safari Web Extension variant would need a native app wrapper. Alternatively, a Tauri or Electron desktop app with an embedded webview could wrap the existing React frontend and add system-tray quick-access.
 - **ASR server migration**: If ASR moves to a server, `mlx-audio` (with `/v1/audio/transcriptions`) is the better fit over oMLX, since oMLX does not expose audio transcription endpoints.

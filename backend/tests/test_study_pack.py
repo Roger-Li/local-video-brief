@@ -160,45 +160,92 @@ class TestStudyPackGenerator:
         assert s0["end_s"] == 300.8   # from chapters, not 295.0
         assert s0["title"] == "Intro"  # title from LLM summary
 
-    def test_generate_learning_objectives_from_highlights(self) -> None:
+    def test_generate_learning_objectives_from_chapter_titles(self) -> None:
+        gen = StudyPackGenerator(_make_settings())
+        result = gen.generate(
+            source_metadata={},
+            chapters=[],
+            chapter_summaries=_make_chapter_summaries(),
+            overall_summary=_make_overall_summary(),
+        )
+        assert result is not None
+        objectives = result["learning_objectives"]
+        assert len(objectives) == 3
+        # Should have action verb prefixes
+        assert objectives[0].startswith("Understand ")
+        assert "Introduction to Machine Learning" in objectives[0]
+        assert objectives[1].startswith("Learn about ")
+        assert "Neural Networks" in objectives[1]
+
+    def test_generate_learning_objectives_fallback_to_highlights(self) -> None:
         gen = StudyPackGenerator(_make_settings())
         overall = _make_overall_summary()
+        # No chapter titles
         result = gen.generate(
             source_metadata={},
             chapters=[],
-            chapter_summaries=_make_chapter_summaries(),
+            chapter_summaries=[{"summary_en": "X", "summary_zh": "Y", "key_points": []}],
             overall_summary=overall,
         )
         assert result is not None
-        assert result["learning_objectives"] == overall["highlights"][:5]
+        objectives = result["learning_objectives"]
+        # Highlights should get "Understand " prefix
+        assert all("Understand " in obj or obj.lower().startswith("understand ") for obj in objectives)
 
-    def test_generate_learning_objectives_fallback_to_titles(self) -> None:
+    def test_learning_objectives_no_double_prefix(self) -> None:
         gen = StudyPackGenerator(_make_settings())
-        overall = {"summary_en": "", "summary_zh": "", "highlights": []}
-        result = gen.generate(
-            source_metadata={},
-            chapters=[],
-            chapter_summaries=_make_chapter_summaries(),
-            overall_summary=overall,
-        )
-        assert result is not None
-        assert result["learning_objectives"] == [
-            "Introduction to Machine Learning",
-            "Neural Networks",
-            "Training Strategies",
+        chapter_summaries = [
+            {"title": "Understand the basics", "summary_en": "X", "summary_zh": "Y", "key_points": []},
+            {"title": "Learn to debug effectively", "summary_en": "X", "summary_zh": "Y", "key_points": []},
+            {"title": "Analyze performance bottlenecks", "summary_en": "X", "summary_zh": "Y", "key_points": []},
         ]
+        result = gen.generate(
+            source_metadata={}, chapters=[], chapter_summaries=chapter_summaries,
+            overall_summary=_make_overall_summary(),
+        )
+        assert result is not None
+        objectives = result["learning_objectives"]
+        # None of these should be double-prefixed
+        assert objectives[0] == "Understand the basics"
+        assert objectives[1] == "Learn to debug effectively"
+        assert objectives[2] == "Analyze performance bottlenecks"
 
-    def test_generate_final_takeaways_from_highlights(self) -> None:
+    def test_generate_final_takeaways_from_key_points(self) -> None:
         gen = StudyPackGenerator(_make_settings())
-        overall = _make_overall_summary()
         result = gen.generate(
             source_metadata={},
             chapters=[],
             chapter_summaries=_make_chapter_summaries(),
-            overall_summary=overall,
+            overall_summary=_make_overall_summary(),
         )
         assert result is not None
-        assert result["final_takeaways"] == overall["highlights"]
+        # Should be derived from chapter key_points, not highlights
+        expected_kps = ["Supervised learning", "Unsupervised learning",
+                        "Backpropagation", "Activation functions",
+                        "Learning rate scheduling"]
+        assert result["final_takeaways"] == expected_kps
+
+    def test_final_takeaways_fallback_to_highlights(self) -> None:
+        gen = StudyPackGenerator(_make_settings())
+        # Chapters with no key_points
+        chapter_summaries = [{"title": "Ch1", "summary_en": "X", "summary_zh": "Y", "key_points": []}]
+        overall = _make_overall_summary()
+        result = gen.generate(
+            source_metadata={}, chapters=[], chapter_summaries=chapter_summaries, overall_summary=overall,
+        )
+        assert result is not None
+        assert result["final_takeaways"] == overall["highlights"][:5]
+
+    def test_objectives_and_takeaways_are_different(self) -> None:
+        gen = StudyPackGenerator(_make_settings())
+        result = gen.generate(
+            source_metadata={},
+            chapters=[],
+            chapter_summaries=_make_chapter_summaries(),
+            overall_summary=_make_overall_summary(),
+        )
+        assert result is not None
+        assert result["learning_objectives"] != result["final_takeaways"]
 
     def test_generate_returns_none_on_failure(self, tmp_path: Path) -> None:
         """Given completely broken input, generate returns None and writes error artifact."""
@@ -225,21 +272,58 @@ class TestStudyPackGenerator:
         assert result is not None
         assert result["sections"] == []
 
-    def test_highlights_capped_at_five(self) -> None:
+    def test_objectives_capped_at_five(self) -> None:
         gen = StudyPackGenerator(_make_settings())
-        overall = {
-            "summary_en": "",
-            "summary_zh": "",
-            "highlights": [f"h{i}" for i in range(10)],
-        }
+        # More than 5 chapters → objectives capped at 5
+        chapter_summaries = [
+            {"title": f"Chapter {i}", "summary_en": "", "summary_zh": "", "key_points": [f"kp{i}"]}
+            for i in range(8)
+        ]
         result = gen.generate(
             source_metadata={},
             chapters=[],
-            chapter_summaries=[],
-            overall_summary=overall,
+            chapter_summaries=chapter_summaries,
+            overall_summary=_make_overall_summary(),
         )
         assert result is not None
         assert len(result["learning_objectives"]) == 5
+
+    def test_takeaways_capped_at_five(self) -> None:
+        gen = StudyPackGenerator(_make_settings())
+        chapter_summaries = [
+            {"title": f"Ch{i}", "summary_en": "", "summary_zh": "", "key_points": [f"kp{i}a", f"kp{i}b"]}
+            for i in range(5)
+        ]
+        result = gen.generate(
+            source_metadata={},
+            chapters=[],
+            chapter_summaries=chapter_summaries,
+            overall_summary=_make_overall_summary(),
+        )
+        assert result is not None
+        assert len(result["final_takeaways"]) == 5
+
+    def test_non_list_key_points_ignored(self) -> None:
+        """Non-list key_points (e.g. null from LLM) must not crash generation."""
+        gen = StudyPackGenerator(_make_settings())
+        chapter_summaries = [
+            {"title": "Ch1", "summary_en": "X", "summary_zh": "Y", "key_points": None},
+            {"title": "Ch2", "summary_en": "X", "summary_zh": "Y", "key_points": "not a list"},
+            {"title": "Ch3", "summary_en": "X", "summary_zh": "Y", "key_points": ["valid"]},
+        ]
+        result = gen.generate(
+            source_metadata={},
+            chapters=[],
+            chapter_summaries=chapter_summaries,
+            overall_summary=_make_overall_summary(),
+        )
+        assert result is not None
+        # Only the valid key_point should appear in takeaways
+        assert result["final_takeaways"] == ["valid"]
+        # Sections should have empty lists for non-list key_points
+        assert result["sections"][0]["key_points"] == []
+        assert result["sections"][1]["key_points"] == []
+        assert result["sections"][2]["key_points"] == ["valid"]
 
 
 # ---------------------------------------------------------------------------
@@ -262,6 +346,8 @@ class TestRenderMarkdown:
             "sections": [
                 {
                     "title": "Intro",
+                    "start_s": 0.0,
+                    "end_s": 300.0,
                     "summary_en": "English summary.",
                     "summary_zh": "中文摘要。",
                     "key_points": ["Point A"],
@@ -274,6 +360,43 @@ class TestRenderMarkdown:
         assert "English summary." in md
         assert "中文摘要。" in md
         assert "- Point A" in md
+
+    def test_render_contains_timestamps(self) -> None:
+        sp = {
+            "learning_objectives": [],
+            "sections": [
+                {
+                    "title": "Introduction",
+                    "start_s": 0.0,
+                    "end_s": 300.0,
+                    "summary_en": "Intro.",
+                    "summary_zh": "介绍。",
+                    "key_points": [],
+                },
+                {
+                    "title": "Main Content",
+                    "start_s": 300.0,
+                    "end_s": 3661.0,
+                    "summary_en": "Content.",
+                    "summary_zh": "内容。",
+                    "key_points": [],
+                },
+            ],
+            "final_takeaways": [],
+        }
+        md = render_study_guide_markdown(sp, {"title": "Test"})
+        assert "[00:00\u201305:00]" in md
+        assert "[05:00\u201361:01]" in md
+
+    def test_render_section_without_timestamps(self) -> None:
+        sp = {
+            "learning_objectives": [],
+            "sections": [{"title": "No Times", "summary_en": "X", "summary_zh": "Y", "key_points": []}],
+            "final_takeaways": [],
+        }
+        md = render_study_guide_markdown(sp, {"title": "T"})
+        assert "### No Times" in md
+        assert "[" not in md.split("### No Times")[1].split("\n")[0]
 
     def test_render_contains_objectives_and_takeaways(self) -> None:
         sp = {

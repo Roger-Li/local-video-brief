@@ -32,7 +32,9 @@ class StudyPackGenerator:
                 overall_summary, chapter_summaries,
             )
             sections = self._build_sections(chapters, chapter_summaries)
-            final_takeaways = self._derive_final_takeaways(overall_summary)
+            final_takeaways = self._derive_final_takeaways(
+                overall_summary, chapter_summaries,
+            )
 
             return {
                 "version": 1,
@@ -53,17 +55,48 @@ class StudyPackGenerator:
                     pass
             return None
 
+    _OBJECTIVE_PREFIXES = [
+        "Understand ",
+        "Learn about ",
+        "Explore ",
+        "Examine ",
+        "Discover ",
+    ]
+
+    # Broader set of action verb stems used to detect titles that are
+    # already phrased as imperatives, so we don't double-prefix them.
+    _ACTION_VERB_STEMS = (
+        "understand ", "learn ", "explore ", "examine ", "discover ",
+        "explain ", "analyze ", "compare ", "describe ", "identify ",
+        "apply ", "evaluate ", "review ", "discuss ", "demonstrate ",
+        "define ", "outline ", "summarize ", "investigate ",
+    )
+
     def _derive_learning_objectives(
         self,
         overall_summary: dict,
         chapter_summaries: list[dict],
     ) -> list[str]:
-        highlights = overall_summary.get("highlights", [])
-        if highlights and len(highlights) >= 1:
-            return highlights[:5]
-        # Fallback: use chapter titles
+        # Build objectives from chapter titles using action verb prefixes.
         titles = [cs.get("title", "") for cs in chapter_summaries if cs.get("title")]
-        return titles[:5]
+        if titles:
+            objectives = []
+            for i, title in enumerate(titles[:5]):
+                prefix = self._OBJECTIVE_PREFIXES[i % len(self._OBJECTIVE_PREFIXES)]
+                # Avoid double-prefixing if title already starts with an action verb.
+                if title.lower().startswith(self._ACTION_VERB_STEMS):
+                    objectives.append(title)
+                else:
+                    objectives.append(f"{prefix}{title}")
+            return objectives
+        # Fallback: use highlights with action prefix.
+        highlights = overall_summary.get("highlights", [])
+        if highlights:
+            return [
+                h if h.lower().startswith(self._ACTION_VERB_STEMS) else f"Understand {h}"
+                for h in highlights[:5]
+            ]
+        return []
 
     def _build_sections(
         self, chapters: list[dict], chapter_summaries: list[dict],
@@ -80,12 +113,35 @@ class StudyPackGenerator:
                 "title": cs.get("title", ch.get("title_hint", f"Chapter {i + 1}")),
                 "summary_en": cs.get("summary_en", ""),
                 "summary_zh": cs.get("summary_zh", ""),
-                "key_points": cs.get("key_points", []),
+                "key_points": cs.get("key_points", []) if isinstance(cs.get("key_points"), list) else [],
             })
         return sections
 
-    def _derive_final_takeaways(self, overall_summary: dict) -> list[str]:
-        return overall_summary.get("highlights", [])
+    def _derive_final_takeaways(
+        self, overall_summary: dict, chapter_summaries: list[dict],
+    ) -> list[str]:
+        """Derive actionable takeaways from chapter key_points, falling back to highlights."""
+        # Collect unique key_points across all chapters, preserving order.
+        seen: set[str] = set()
+        key_points: list[str] = []
+        for cs in chapter_summaries:
+            kps = cs.get("key_points", [])
+            if not isinstance(kps, list):
+                kps = []
+            for kp in kps:
+                if kp not in seen:
+                    seen.add(kp)
+                    key_points.append(kp)
+        if key_points:
+            return key_points[:5]
+        # Fallback to highlights if no key_points available.
+        return overall_summary.get("highlights", [])[:5]
+
+
+def _format_timestamp(seconds: float) -> str:
+    """Format seconds as MM:SS."""
+    total = int(seconds)
+    return f"{total // 60:02d}:{total % 60:02d}"
 
 
 def render_study_guide_markdown(study_pack: dict, source_metadata: dict) -> str:
@@ -112,7 +168,13 @@ def render_study_guide_markdown(study_pack: dict, source_metadata: dict) -> str:
         lines.append("")
         for section in sections:
             section_title = section.get("title", "Untitled")
-            lines.append(f"### {section_title}")
+            start_s = section.get("start_s")
+            end_s = section.get("end_s")
+            if isinstance(start_s, (int, float)) and isinstance(end_s, (int, float)):
+                ts = f"[{_format_timestamp(start_s)}\u2013{_format_timestamp(end_s)}]"
+                lines.append(f"### {section_title} {ts}")
+            else:
+                lines.append(f"### {section_title}")
             lines.append("")
             summary_en = section.get("summary_en", "")
             if summary_en:

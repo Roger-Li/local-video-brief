@@ -1,13 +1,13 @@
 ---
 name: test-e2e
 description: Run end-to-end pipeline tests against real video URLs to validate feature changes. Use when the user wants to test with real videos, validate summarization, or verify pipeline behavior after code changes.
-argument-hint: [video-url] [--provider fallback|mlx|omlx] [--timeout 300] [--no-frontend]
+argument-hint: [video-url] [--provider fallback|mlx|omlx] [--timeout 300] [--allow-section-refinement] [--expect-timestamps] [--no-frontend]
 disable-model-invocation: true
 ---
 
 # E2E Pipeline Test
 
-Run end-to-end tests against real video URLs to validate the full pipeline — backend summarization, study pack generation, and frontend rendering.
+Run end-to-end tests against real video URLs to validate the full pipeline: backend summarization, study pack generation, artifacts, and frontend build health. Prefer automated checks over manual inspection.
 
 ## Arguments
 
@@ -17,7 +17,9 @@ Run end-to-end tests against real video URLs to validate the full pipeline — b
   - `--provider <fallback|mlx|omlx>` — summarizer provider (default: reads from `.env` or falls back to `fallback`)
   - `--timeout <seconds>` — oMLX timeout (default: 300)
   - `--asr` — force enable MLX ASR even if captions are available
-  - `--no-frontend` — skip frontend build check and Playwright UI validation
+  - `--allow-section-refinement` — allow `study_pack.sections` to differ from chapter count for Phase B v2+
+  - `--expect-timestamps` — require timestamp ranges in generated `study_guide.md`
+  - `--no-frontend` — skip frontend build and frontend test checks
 - If no URL is provided, use the default bilibili URL from the smoke test script
 
 ## Environment Setup
@@ -34,9 +36,13 @@ Run end-to-end tests against real video URLs to validate the full pipeline — b
 
 3. Clear stale DB before each run: `rm -f data/local_video_brief.sqlite3`
 
+4. Record the smoke-test backend port:
+   - `PORT="${OVS_TEST_PORT:-8010}"`
+   - Use this same port for any frontend checks via `VITE_API_BASE_URL=http://127.0.0.1:${PORT}`
+
 ## Execution
 
-Run each video URL through the smoke test. Always set `OVS_ENABLE_STUDY_PACK=true` to exercise the study pack pipeline:
+Run each video URL through the smoke test. Always set `OVS_ENABLE_STUDY_PACK=true` to exercise the study-pack path:
 
 ```bash
 rm -f data/local_video_brief.sqlite3
@@ -54,87 +60,69 @@ OVS_TEST_MAX_POLLS=300 \
 
 ## Result Inspection
 
-After each test completes, inspect the result:
+After each run, validate the saved result automatically with the helper script:
 
-1. Find the result JSON: `ls -t artifacts/test-runs/*-result.json | head -1`
+```bash
+RESULT_PATH="$(ls -t artifacts/test-runs/*-result.json | head -1)"
+PORT="${OVS_TEST_PORT:-8010}"
+VALIDATE_ARGS=(
+  --result "${RESULT_PATH}"
+  --backend-log "artifacts/test-runs/backend-${PORT}.log"
+  --expect-study-pack
+)
+```
 
-2. Print a compact validation summary:
-   - Number of chapters
-   - For each chapter: time range, title, first 80 chars of English summary
-   - Overall summary snippet (first 120 chars)
-   - Highlights list
-   - Whether summaries are LLM-generated (substantive bilingual) or rule-based (transcript extraction)
+Add flags based on the run:
 
-3. **Study pack validation** (always checked since `OVS_ENABLE_STUDY_PACK=true`):
-   - Verify `study_pack` field is present and non-null in result JSON
-   - Check `study_pack.version`, `study_pack.format`
-   - Count `learning_objectives`, `sections`, `final_takeaways`
-   - Verify section count matches chapter count (1:1 in v1)
-   - Verify each section has `start_s`, `end_s`, `title`, `summary_en`, `summary_zh`, `key_points`
-   - Verify section timestamps are monotonically increasing
+- If provider is `mlx` or `omlx`, append `--expect-llm-artifacts`
+- If provider is `omlx`, append `--expect-omlx-request`
+- If `--allow-section-refinement` was passed, append `--allow-section-refinement`
+- If `--expect-timestamps` was passed, append `--expect-timestamp-markdown`
 
-4. Check artifacts exist:
-   - `artifacts/<job-id>/summarizer_prompt.txt`
-   - `artifacts/<job-id>/summarizer_request.json` (oMLX only)
-   - `artifacts/<job-id>/summarizer_raw_output.txt` (LLM providers only)
-   - `artifacts/<job-id>/transcript_raw.json`
-   - `artifacts/<job-id>/transcript_normalized.json`
-   - `artifacts/<job-id>/study_pack.json`
-   - `artifacts/<job-id>/study_guide.md`
+Then run:
 
-5. Check the backend log for warnings/errors:
-   ```bash
-   grep -E "WARNING|ERROR|fallback|timed out" artifacts/test-runs/backend-*.log
-   ```
+```bash
+python3 ./scripts/validate_e2e_run.py "${VALIDATE_ARGS[@]}"
+```
+
+The validator checks:
+- completed status
+- non-empty chapters, transcript segments, bilingual summaries, highlights
+- transcript artifacts
+- optional study-pack structure and artifact files
+- optional timestamp rendering in `study_guide.md`
+- current hierarchical artifact layout
+- oMLX request artifacts when applicable
+- warning/error/fallback lines in the backend log
 
 ## Frontend Validation
 
-Unless `--no-frontend` is passed, run frontend validation after the backend pipeline completes. This requires a completed job with `study_pack` present in the result JSON.
-
-### Step 1: Build check
+Unless `--no-frontend` is passed, run automated frontend checks after the backend validation succeeds.
 
 ```bash
-cd frontend && npm install && npx tsc --noEmit --skipLibCheck && npx vite build
+cd frontend
+npx tsc --noEmit --skipLibCheck
+npx vite build
 ```
 
-Report pass/fail. If the build fails, show the errors and skip the dev server step.
+If the repo has a frontend test script, run it too:
 
-### Step 2: Start frontend for manual UI inspection
+```bash
+npm run test --if-present
+npm run test:e2e --if-present
+```
 
-The smoke test leaves the backend running. Start the frontend dev server so the user can open the browser and interact with the result UI:
+If there is no frontend test script yet, report that the automated frontend coverage is currently limited to build validation and recommend adding component/e2e tests instead of asking the user to click around manually.
 
-1. Start the frontend dev server in the background:
-   ```bash
-   cd frontend && npx vite --port 5173 &
-   ```
-   Wait a few seconds for it to start, then verify it responds:
-   ```bash
-   curl -s -o /dev/null -w "%{http_code}" http://localhost:5173
-   ```
+Only start a frontend dev server if the user explicitly asks for browser verification. When doing so, wire it to the smoke-test backend port:
 
-2. Print a clear message telling the user what to do:
-   ```
-   Frontend is running at http://localhost:5173
-   Backend is running at http://127.0.0.1:8000
-
-   To verify the UI:
-   1. Open http://localhost:5173 in your browser
-   2. Paste the video URL and submit
-   3. Wait for the job to complete
-   4. Check: three tabs appear (Summary | Study Guide | Transcript)
-   5. Click "Study Guide" — verify learning objectives, sections, and takeaways render
-   6. Click "Export Markdown" — a .md file should download
-   7. Click "Transcript" — verify transcript rows render
-
-   Both servers will keep running until you stop them.
-   To stop: kill the backend and frontend processes, or press Ctrl+C.
-   ```
-
-3. Do NOT stop the servers — leave them running for the user to inspect.
+```bash
+VITE_API_BASE_URL="http://127.0.0.1:${PORT}" npx vite --port 5173
+```
 
 ## Output Format
 
-Present results as a table per video:
+For each URL, report:
 
 ```
 ## <video-title> (<url>)
@@ -144,42 +132,26 @@ Present results as a table per video:
 | Status | completed / failed |
 | Provider | omlx / mlx / fallback |
 | Chapters | N |
-| Source | captions / asr / mixed |
-| Summarizer | LLM / rule-based |
-| Pipeline time | Xs |
-
-### Chapters
-- [0-120s] Chapter Title — first 80 chars of summary...
-- [120-300s] Chapter Title — first 80 chars of summary...
-
-### Overall
-summary snippet...
+| Transcript source | captions / asr / mixed |
+| Validation | pass / fail |
+| Frontend build | pass / fail / skipped |
 
 ### Study Pack
 | Field | Value |
 |---|---|
 | Present | yes/no |
 | Learning objectives | N |
-| Sections | N (matches chapters: yes/no) |
+| Sections | N |
 | Final takeaways | N |
-| study_pack.json | yes/no (size) |
-| study_guide.md | yes/no (size) |
+| Timestamp markdown | yes/no/not-checked |
 
 ### Artifacts
-- prompt: yes/no
-- request: yes/no (omlx only)
-- raw_output: yes/no
-- transcripts: raw=yes normalized=yes
-- study_pack.json: yes/no
-- study_guide.md: yes/no
-
-### Frontend
-| Check | Result |
-|---|---|
-| TypeScript build | pass/fail |
-| Vite build | pass/fail |
-| Dev server running | yes/no (http://localhost:5173) |
-| Backend still running | yes/no (http://127.0.0.1:8000) |
+- transcript_raw_path: yes/no
+- transcript_normalized_path: yes/no
+- summarizer prompts/raw output: yes/no
+- oMLX requests: yes/no/not-applicable
+- study_pack_path: yes/no
+- study_guide_path: yes/no
 
 ### Warnings
 (any warnings or errors from the backend log)
@@ -192,8 +164,9 @@ If multiple URLs are provided, run them sequentially (they share GPU resources).
 ## Error Handling
 
 - If the smoke test script fails, show the last 30 lines of the backend log
+- If the validator fails, report each failed assertion clearly and stop claiming success
 - If the oMLX server is unreachable, note whether fallback to rule-based worked
 - If ASR is needed but mlx-whisper is not installed, tell the user how to install it
-- If `study_pack` is null despite `OVS_ENABLE_STUDY_PACK=true`, check for `study_pack_error.txt` in the artifacts directory and report the error
-- If the frontend build fails, show the TypeScript / Vite errors and skip the dev server step
-- If the frontend dev server doesn't start (curl check fails), report the error
+- If `study_pack` is null despite `OVS_ENABLE_STUDY_PACK=true`, check for `study_pack_error.txt` in the artifact directory and report the error
+- If frontend build fails, show the TypeScript / Vite errors
+- Do not replace automated checks with manual inspection unless the user explicitly asks for browser verification
