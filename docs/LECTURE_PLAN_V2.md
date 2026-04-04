@@ -71,8 +71,17 @@ E2E testing against a 61-minute workshop (YouTube Live) and comparison with Gemi
 - No-double-prefix guard: titles already starting with an action verb are not re-prefixed.
 - All changes deterministic (no LLM calls). Backward compatible — `study_pack` JSON schema unchanged.
 
-**Deferred to v3:**
-- Section refinement: split oversized chapters (>5 min and >450 words) into 2-3 sections. Requires per-section LLM summarization.
+**v3 status: COMPLETED (2026-04-03).** Deterministic section refinement shipped. 157 tests pass (11 new).
+
+**What shipped in v3:**
+- Oversized chapters (>5 min AND >450 words) split into 2-3 sub-sections by word budget (~300 words/section), capped at 10 total sections.
+- Fully deterministic — first sub-section inherits LLM chapter summary; additional sub-sections extract representative sentences from transcript slices.
+- Sub-section titles append "(Part N)"; key_points distributed round-robin.
+- Frontend React key fixed to avoid duplicate keys when multiple sections share `chapter_index`.
+- E2E validated on 61-min workshop (4 chapters → 10 sections: 3 oversized chapters split into 3 sub-sections each + 1 short chapter pass-through).
+
+**Deferred:**
+- LLM-based per-section summarization for additional sub-sections (currently uses sentence extraction).
 - Speaker attribution, `prerequisites`, `teaching_notes`, `core_terms`, `review_questions`.
 
 ## Phase C — Frontend Study Guide And Export Path

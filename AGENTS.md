@@ -56,7 +56,7 @@ This repository builds a local-first video summary tool for Apple Silicon Macs. 
 
 ## Testing Expectations
 
-- Run backend tests with `python3 -m pytest backend/tests` (88 tests).
+- Run backend tests with `python3 -m pytest backend/tests` (157 tests).
 - For real end-to-end validation, run:
 
 ```bash
@@ -110,7 +110,7 @@ OVS_TEST_SUMMARIZER_PROVIDER=omlx OVS_OMLX_BASE_URL=http://localhost:8080/v1 OVS
 - Optional `study_pack` in the job result payload, behind `OVS_ENABLE_STUDY_PACK=false` (default off).
 - v1 is fully deterministic — no LLM calls. Transforms existing chapter summaries and overall summary into a structured study guide.
 - `StudyPackGenerator` in `services/study_pack.py`; `StudySection`, `StudyPack` Pydantic models in `schemas/jobs.py`.
-- Schema: `version`, `format`, `learning_objectives`, `sections[]` (one per chapter), `final_takeaways`.
+- Schema: `version`, `format`, `learning_objectives`, `sections[]`, `final_takeaways`.
 - Section `start_s`/`end_s` are derived from authoritative chapter data (not LLM output), preventing timestamp drift.
 - `learning_objectives`: up to 5 items derived from chapter titles with action verb prefixes ("Understand ...", "Learn about ...", etc.), falling back to highlights.
 - `final_takeaways`: up to 5 unique key_points collected across all chapters, falling back to highlights. Distinct from `learning_objectives`.
@@ -118,6 +118,17 @@ OVS_TEST_SUMMARIZER_PROVIDER=omlx OVS_OMLX_BASE_URL=http://localhost:8080/v1 OVS
 - Pipeline stage: `generating_study_pack` runs after summarizer, before `COMPLETED`. Failure-isolated — errors never fail the job.
 - Artifacts: `study_pack.json`, `study_guide.md` persisted under `artifacts/<job-id>/`.
 - API: `study_pack: null` in response when disabled or absent.
+
+### Section Refinement
+
+- Oversized chapters (>5 min AND >450 words) are split into 2-3 sub-sections by word budget (~300 words/section).
+- Total sections capped at 10 to keep the study guide manageable.
+- Fully deterministic — no LLM calls. First sub-section inherits the LLM chapter summary; additional sub-sections extract representative sentences from their transcript slice.
+- Sub-section titles append "(Part N)" to the chapter title.
+- `key_points` are distributed round-robin across sub-sections.
+- `chapter_index` is shared across sub-sections from the same chapter. Frontend uses array index as React key to avoid duplicates.
+- Chapters below either threshold (duration < 5 min OR words < 450) pass through as single sections.
+- Chapters without segment data (e.g., missing from the chapterer) are never refined.
 
 ## Per-Job Options
 
@@ -136,7 +147,7 @@ OVS_TEST_SUMMARIZER_PROVIDER=omlx OVS_OMLX_BASE_URL=http://localhost:8080/v1 OVS
 - There is no auth, cloud sync, OCR, diarization, or Q&A flow in this repo.
 - Transcript normalization handles most rolling-caption patterns but may leave residual duplication in edge cases.
 - The summarizer worker processes jobs sequentially; concurrent submissions queue up.
-- The study pack is fully deterministic (no LLM calls); section refinement (splitting oversized chapters into multiple sections) is deferred to a future version.
+- The study pack is fully deterministic (no LLM calls). Section refinement splits oversized chapters but additional sub-sections use extracted transcript sentences, not LLM summaries.
 - Chaptering splits purely on duration (8 min) and gap (45s) thresholds with no semantic awareness. Continuous lectures without natural pauses get uniform time-based chapters.
 
 ## Editing Guidance
@@ -148,7 +159,7 @@ OVS_TEST_SUMMARIZER_PROVIDER=omlx OVS_OMLX_BASE_URL=http://localhost:8080/v1 OVS
 
 ## Future Directions
 
-- **Study pack section refinement**: Split oversized chapters (>5 min and >450 words) into 2-3 sections targeting ~250-350 words each, capped at 10 sections total. Requires per-section LLM summarization from transcript slices.
+- **LLM-based sub-section summaries**: The current section refinement extracts transcript sentences for additional sub-sections. Per-section LLM summarization from transcript slices would improve quality but requires passing the summary generator into the study pack generator.
 - **oMLX server for model hosting**: The `omlx` summarizer provider is implemented (v1, OpenAI-compatible, non-streaming). Future work: streaming support, retry-once for transient errors, and Anthropic-compatible endpoint support if needed.
 - **Browser-integrated summarization**: Build a browser extension (Chrome/Firefox WebExtension API) that detects YouTube/bilibili video pages, triggers summary jobs against the local backend, and displays results in a sidebar overlay. This requires the backend to be running locally and the extension to communicate via `localhost` API. A Safari Web Extension variant would need a native app wrapper. Alternatively, a Tauri or Electron desktop app with an embedded webview could wrap the existing React frontend and add system-tray quick-access.
 - **ASR server migration**: If ASR moves to a server, `mlx-audio` (with `/v1/audio/transcriptions`) is the better fit over oMLX, since oMLX does not expose audio transcription endpoints.

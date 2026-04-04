@@ -121,6 +121,7 @@ OVS_OMLX_MODEL=<model> \
 - Per-job artifacts are written to `artifacts/<job-id>/`:
   - `transcript_raw.json` and `transcript_normalized.json` (before/after normalization)
   - `summarizer_prompt.txt` and `summarizer_raw_output.txt` (LLM debugging)
+  - `study_pack.json` and `study_guide.md` (when study pack is enabled)
   - `source.*.vtt` (downloaded subtitle files)
 - The isolated backend log is written to `artifacts/test-runs/backend-8010.log`.
 
@@ -140,6 +141,7 @@ OVS_OMLX_MODEL=<model> \
 | `OVS_OMLX_MODEL` | | Model name for oMLX requests (required for `omlx`) |
 | `OVS_OMLX_API_KEY` | | Optional bearer token for oMLX |
 | `OVS_OMLX_TIMEOUT_SECONDS` | `180` | Request timeout for oMLX calls |
+| `OVS_ENABLE_STUDY_PACK` | `false` | Enable study guide generation from chapter summaries |
 
 ## Known Limitations
 

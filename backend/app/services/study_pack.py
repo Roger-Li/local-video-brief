@@ -1,11 +1,32 @@
 from __future__ import annotations
 
 import logging
+import re
 from pathlib import Path
 
 from backend.app.core.config import Settings
+from backend.app.utils.text import CHINESE_CHAR_RE
 
 logger = logging.getLogger(__name__)
+
+# Section refinement thresholds.
+_MIN_DURATION_FOR_SPLIT_S = 300  # 5 minutes
+_MIN_WORDS_FOR_SPLIT = 450
+_TARGET_WORDS_PER_SECTION = 300  # ~250-350
+_MAX_TOTAL_SECTIONS = 10
+
+
+def _count_words(text: str) -> int:
+    """Count words in a CJK-safe way.
+
+    Each CJK character counts as one word. Non-CJK tokens are counted
+    via whitespace splitting (after stripping CJK chars to avoid
+    double-counting).
+    """
+    cjk_count = len(CHINESE_CHAR_RE.findall(text))
+    non_cjk = CHINESE_CHAR_RE.sub("", text)
+    space_tokens = len(non_cjk.split()) if non_cjk.strip() else 0
+    return cjk_count + space_tokens
 
 
 class StudyPackGenerator:
@@ -101,21 +122,130 @@ class StudyPackGenerator:
     def _build_sections(
         self, chapters: list[dict], chapter_summaries: list[dict],
     ) -> list[dict]:
-        sections = []
+        sections: list[dict] = []
+        # Budget: how many more sections we can emit before hitting the cap.
+        budget = _MAX_TOTAL_SECTIONS
+
         for i, cs in enumerate(chapter_summaries):
-            # Use authoritative chapter data for timestamps/title,
-            # fall back to LLM summary values only if chapter data is missing.
             ch = chapters[i] if i < len(chapters) else {}
-            sections.append({
-                "chapter_index": i,
-                "start_s": ch.get("start_s", cs.get("start_s", 0.0)),
-                "end_s": ch.get("end_s", cs.get("end_s", 0.0)),
-                "title": cs.get("title", ch.get("title_hint", f"Chapter {i + 1}")),
-                "summary_en": cs.get("summary_en", ""),
-                "summary_zh": cs.get("summary_zh", ""),
-                "key_points": cs.get("key_points", []) if isinstance(cs.get("key_points"), list) else [],
-            })
+            start_s = ch.get("start_s", cs.get("start_s", 0.0))
+            end_s = ch.get("end_s", cs.get("end_s", 0.0))
+            title = cs.get("title", ch.get("title_hint", f"Chapter {i + 1}"))
+            key_points = cs.get("key_points", []) if isinstance(cs.get("key_points"), list) else []
+
+            segments = ch.get("segments", [])
+            if budget >= 2 and self._should_refine(start_s, end_s, segments):
+                sub_sections = self._refine_chapter(
+                    i, start_s, end_s, title, cs, key_points, segments, budget,
+                )
+                sections.extend(sub_sections)
+                budget -= len(sub_sections)
+            else:
+                # Single section per chapter (always emitted, even at budget 0,
+                # so trailing chapters are never dropped from the study guide).
+                sections.append({
+                    "chapter_index": i,
+                    "start_s": start_s,
+                    "end_s": end_s,
+                    "title": title,
+                    "summary_en": cs.get("summary_en", ""),
+                    "summary_zh": cs.get("summary_zh", ""),
+                    "key_points": key_points,
+                })
+                budget -= 1
         return sections
+
+    @staticmethod
+    def _should_refine(start_s: float, end_s: float, segments: list[dict]) -> bool:
+        """Return True if this chapter exceeds both duration and word thresholds."""
+        duration = end_s - start_s
+        if duration < _MIN_DURATION_FOR_SPLIT_S:
+            return False
+        word_count = sum(_count_words(seg.get("text", "")) for seg in segments)
+        return word_count >= _MIN_WORDS_FOR_SPLIT
+
+    def _refine_chapter(
+        self,
+        chapter_index: int,
+        start_s: float,
+        end_s: float,
+        title: str,
+        chapter_summary: dict,
+        key_points: list[str],
+        segments: list[dict],
+        budget: int,
+    ) -> list[dict]:
+        """Split an oversized chapter into 2-3 sub-sections by word budget."""
+        total_words = sum(_count_words(seg.get("text", "")) for seg in segments)
+        target_parts = min(3, max(2, round(total_words / _TARGET_WORDS_PER_SECTION)))
+        target_parts = min(target_parts, budget)  # respect global cap
+        words_per_part = total_words / target_parts
+
+        # Partition segments into sub-section groups.
+        groups: list[list[dict]] = []
+        current_group: list[dict] = []
+        current_words = 0
+        for seg in segments:
+            seg_words = _count_words(seg.get("text", ""))
+            current_group.append(seg)
+            current_words += seg_words
+            if current_words >= words_per_part and len(groups) < target_parts - 1:
+                groups.append(current_group)
+                current_group = []
+                current_words = 0
+        if current_group:
+            groups.append(current_group)
+
+        # Distribute key_points round-robin across sub-sections.
+        kp_buckets: list[list[str]] = [[] for _ in range(len(groups))]
+        for kp_idx, kp in enumerate(key_points):
+            kp_buckets[kp_idx % len(groups)].append(kp)
+
+        sub_sections: list[dict] = []
+        for part_idx, group in enumerate(groups):
+            g_start = group[0]["start_s"] if group else start_s
+            g_end = group[-1]["end_s"] if group else end_s
+            part_label = f" (Part {part_idx + 1})"
+            if part_idx == 0:
+                # First sub-section inherits the LLM-produced summary.
+                sub_sections.append({
+                    "chapter_index": chapter_index,
+                    "start_s": g_start,
+                    "end_s": g_end,
+                    "title": title + part_label,
+                    "summary_en": chapter_summary.get("summary_en", ""),
+                    "summary_zh": chapter_summary.get("summary_zh", ""),
+                    "key_points": kp_buckets[part_idx],
+                })
+            else:
+                # Additional sub-sections: extract sentences from transcript slice.
+                slice_text = " ".join(seg.get("text", "") for seg in group)
+                summary_en = self._extract_summary_sentences(slice_text)
+                sub_sections.append({
+                    "chapter_index": chapter_index,
+                    "start_s": g_start,
+                    "end_s": g_end,
+                    "title": title + part_label,
+                    "summary_en": summary_en,
+                    "summary_zh": "",
+                    "key_points": kp_buckets[part_idx],
+                })
+        return sub_sections
+
+    @staticmethod
+    def _extract_summary_sentences(text: str, limit: int = 3) -> str:
+        """Extract up to *limit* sentences from text for sub-section summaries."""
+        normalized = re.sub(r"\s+", " ", text).strip()
+        if not normalized:
+            return ""
+        parts = re.split(r"(?<=[.!?。！？])\s+", normalized)
+        sentences = [p.strip() for p in parts if p.strip()][:limit]
+        if sentences:
+            return " ".join(sentences)
+        # No sentence boundaries: truncate to ~350 chars.
+        if len(normalized) > 350:
+            return normalized[:350].rstrip() + "…"
+        return normalized
 
     def _derive_final_takeaways(
         self, overall_summary: dict, chapter_summaries: list[dict],

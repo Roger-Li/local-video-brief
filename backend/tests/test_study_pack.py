@@ -327,6 +327,305 @@ class TestStudyPackGenerator:
 
 
 # ---------------------------------------------------------------------------
+# Section refinement helpers
+# ---------------------------------------------------------------------------
+
+def _make_oversized_segments(word_count: int, num_segments: int, start_s: float = 0.0, duration_s: float = 600.0) -> list[dict]:
+    """Create segments totalling approximately *word_count* words over *duration_s* seconds."""
+    words_per_seg = max(1, word_count // num_segments)
+    seg_duration = duration_s / num_segments
+    segments = []
+    for i in range(num_segments):
+        s_start = start_s + i * seg_duration
+        s_end = s_start + seg_duration
+        text = " ".join(f"word{i}_{j}" for j in range(words_per_seg))
+        # Add sentence endings to some segments so _extract_summary_sentences works.
+        if i % 3 == 2:
+            text += "."
+        segments.append({"start_s": s_start, "end_s": s_end, "text": text})
+    return segments
+
+
+def _make_oversized_chapter(start_s: float = 0.0, end_s: float = 600.0, word_count: int = 600) -> dict:
+    """Create a chapter dict with segments exceeding refinement thresholds."""
+    segments = _make_oversized_segments(word_count, num_segments=20, start_s=start_s, duration_s=end_s - start_s)
+    text = " ".join(seg["text"] for seg in segments)
+    return {
+        "start_s": start_s,
+        "end_s": end_s,
+        "title_hint": "Long Chapter",
+        "segments": segments,
+        "text": text,
+    }
+
+
+# ---------------------------------------------------------------------------
+# Section refinement tests
+# ---------------------------------------------------------------------------
+
+class TestSectionRefinement:
+    def test_oversized_chapter_is_split(self) -> None:
+        """Chapter >5 min and >450 words should produce 2-3 sub-sections."""
+        gen = StudyPackGenerator(_make_settings())
+        chapter = _make_oversized_chapter(start_s=0.0, end_s=600.0, word_count=600)
+        chapter_summaries = [{
+            "title": "Long Topic",
+            "summary_en": "Overview of long topic.",
+            "summary_zh": "长主题概述。",
+            "key_points": ["KP1", "KP2", "KP3"],
+        }]
+        result = gen.generate(
+            source_metadata={},
+            chapters=[chapter],
+            chapter_summaries=chapter_summaries,
+            overall_summary=_make_overall_summary(),
+        )
+        assert result is not None
+        sections = result["sections"]
+        assert len(sections) >= 2
+        assert len(sections) <= 3
+        # All sub-sections share the same chapter_index.
+        assert all(s["chapter_index"] == 0 for s in sections)
+
+    def test_refined_section_titles_have_part_labels(self) -> None:
+        gen = StudyPackGenerator(_make_settings())
+        chapter = _make_oversized_chapter(start_s=0.0, end_s=600.0, word_count=600)
+        chapter_summaries = [{
+            "title": "Long Topic",
+            "summary_en": "Summary.",
+            "summary_zh": "摘要。",
+            "key_points": [],
+        }]
+        result = gen.generate(
+            source_metadata={},
+            chapters=[chapter],
+            chapter_summaries=chapter_summaries,
+            overall_summary=_make_overall_summary(),
+        )
+        assert result is not None
+        titles = [s["title"] for s in result["sections"]]
+        assert titles[0] == "Long Topic (Part 1)"
+        assert titles[1] == "Long Topic (Part 2)"
+
+    def test_refined_first_section_inherits_llm_summary(self) -> None:
+        gen = StudyPackGenerator(_make_settings())
+        chapter = _make_oversized_chapter()
+        chapter_summaries = [{
+            "title": "Topic",
+            "summary_en": "LLM produced summary.",
+            "summary_zh": "LLM生成的摘要。",
+            "key_points": [],
+        }]
+        result = gen.generate(
+            source_metadata={},
+            chapters=[chapter],
+            chapter_summaries=chapter_summaries,
+            overall_summary=_make_overall_summary(),
+        )
+        assert result is not None
+        assert result["sections"][0]["summary_en"] == "LLM produced summary."
+        assert result["sections"][0]["summary_zh"] == "LLM生成的摘要。"
+
+    def test_refined_additional_sections_have_extracted_summary(self) -> None:
+        gen = StudyPackGenerator(_make_settings())
+        chapter = _make_oversized_chapter()
+        chapter_summaries = [{
+            "title": "Topic",
+            "summary_en": "LLM summary.",
+            "summary_zh": "摘要。",
+            "key_points": [],
+        }]
+        result = gen.generate(
+            source_metadata={},
+            chapters=[chapter],
+            chapter_summaries=chapter_summaries,
+            overall_summary=_make_overall_summary(),
+        )
+        assert result is not None
+        # Second sub-section should have non-empty extracted summary_en.
+        assert result["sections"][1]["summary_en"] != ""
+        # summary_zh is empty for extracted sub-sections.
+        assert result["sections"][1]["summary_zh"] == ""
+
+    def test_refined_timestamps_are_contiguous(self) -> None:
+        """Sub-section timestamps should not overlap and should cover the chapter range."""
+        gen = StudyPackGenerator(_make_settings())
+        chapter = _make_oversized_chapter(start_s=100.0, end_s=700.0)
+        chapter_summaries = [{
+            "title": "T", "summary_en": "S", "summary_zh": "Z", "key_points": [],
+        }]
+        result = gen.generate(
+            source_metadata={},
+            chapters=[chapter],
+            chapter_summaries=chapter_summaries,
+            overall_summary=_make_overall_summary(),
+        )
+        assert result is not None
+        sections = result["sections"]
+        # First section starts at or after chapter start.
+        assert sections[0]["start_s"] >= 100.0
+        # Last section ends at or before chapter end.
+        assert sections[-1]["end_s"] <= 700.0
+        # No gaps or overlaps: each section starts where the previous ended or after.
+        for i in range(1, len(sections)):
+            assert sections[i]["start_s"] >= sections[i - 1]["end_s"]
+
+    def test_key_points_distributed_across_sub_sections(self) -> None:
+        gen = StudyPackGenerator(_make_settings())
+        chapter = _make_oversized_chapter()
+        chapter_summaries = [{
+            "title": "T", "summary_en": "S", "summary_zh": "Z",
+            "key_points": ["A", "B", "C", "D"],
+        }]
+        result = gen.generate(
+            source_metadata={},
+            chapters=[chapter],
+            chapter_summaries=chapter_summaries,
+            overall_summary=_make_overall_summary(),
+        )
+        assert result is not None
+        all_kps = []
+        for s in result["sections"]:
+            all_kps.extend(s["key_points"])
+        # All key_points are preserved.
+        assert sorted(all_kps) == sorted(["A", "B", "C", "D"])
+
+    def test_short_chapter_not_refined(self) -> None:
+        """Chapters under 5 min or under 450 words should not be split."""
+        gen = StudyPackGenerator(_make_settings())
+        # 4 min chapter with 500 words — duration too short.
+        chapter = _make_oversized_chapter(start_s=0.0, end_s=240.0, word_count=500)
+        chapter_summaries = [{
+            "title": "Short", "summary_en": "S", "summary_zh": "Z", "key_points": [],
+        }]
+        result = gen.generate(
+            source_metadata={},
+            chapters=[chapter],
+            chapter_summaries=chapter_summaries,
+            overall_summary=_make_overall_summary(),
+        )
+        assert result is not None
+        assert len(result["sections"]) == 1
+        assert "(Part" not in result["sections"][0]["title"]
+
+    def test_low_word_count_not_refined(self) -> None:
+        """Chapters with enough duration but <450 words should not be split."""
+        gen = StudyPackGenerator(_make_settings())
+        chapter = _make_oversized_chapter(start_s=0.0, end_s=600.0, word_count=400)
+        chapter_summaries = [{
+            "title": "Sparse", "summary_en": "S", "summary_zh": "Z", "key_points": [],
+        }]
+        result = gen.generate(
+            source_metadata={},
+            chapters=[chapter],
+            chapter_summaries=chapter_summaries,
+            overall_summary=_make_overall_summary(),
+        )
+        assert result is not None
+        assert len(result["sections"]) == 1
+
+    def test_total_sections_capped_but_trailing_chapters_preserved(self) -> None:
+        """Oversized chapters stop splitting at 10, but trailing chapters still get 1 section each."""
+        gen = StudyPackGenerator(_make_settings())
+        chapters = []
+        chapter_summaries = []
+        for i in range(6):
+            chapters.append(_make_oversized_chapter(
+                start_s=i * 700, end_s=(i + 1) * 700, word_count=900,
+            ))
+            chapter_summaries.append({
+                "title": f"Chapter {i + 1}",
+                "summary_en": f"Summary {i + 1}.",
+                "summary_zh": f"摘要{i + 1}。",
+                "key_points": [f"kp{i}"],
+            })
+        result = gen.generate(
+            source_metadata={},
+            chapters=chapters,
+            chapter_summaries=chapter_summaries,
+            overall_summary=_make_overall_summary(),
+        )
+        assert result is not None
+        # Early chapters get refined (2-3 sections each), later ones fall back to 1.
+        # All 6 chapters must be represented — no chapter dropped.
+        represented = {s["chapter_index"] for s in result["sections"]}
+        assert represented == {0, 1, 2, 3, 4, 5}
+
+    def test_mixed_chapters_only_oversized_refined(self) -> None:
+        """Only oversized chapters get split; normal ones pass through as 1 section."""
+        gen = StudyPackGenerator(_make_settings())
+        small_ch = {"start_s": 0, "end_s": 200, "segments": [], "text": "short"}
+        big_ch = _make_oversized_chapter(start_s=200, end_s=900, word_count=700)
+        chapters = [small_ch, big_ch]
+        chapter_summaries = [
+            {"title": "Small", "summary_en": "S", "summary_zh": "Z", "key_points": []},
+            {"title": "Big", "summary_en": "B", "summary_zh": "大", "key_points": ["X"]},
+        ]
+        result = gen.generate(
+            source_metadata={},
+            chapters=chapters,
+            chapter_summaries=chapter_summaries,
+            overall_summary=_make_overall_summary(),
+        )
+        assert result is not None
+        # First section is the small chapter (chapter_index=0), not split.
+        assert result["sections"][0]["chapter_index"] == 0
+        assert "(Part" not in result["sections"][0]["title"]
+        # Remaining sections are from the big chapter (chapter_index=1).
+        big_sections = [s for s in result["sections"] if s["chapter_index"] == 1]
+        assert len(big_sections) >= 2
+
+    def test_cjk_chapter_refinement(self) -> None:
+        """Chinese text (no spaces) should still trigger refinement via CJK char counting."""
+        gen = StudyPackGenerator(_make_settings())
+        # 500 CJK characters across 10 segments, 10 min duration — should refine.
+        segments = []
+        for i in range(10):
+            text = "这是测试" * 12 + "。"  # 49 chars per segment, ~50 "words" via CJK counting
+            segments.append({"start_s": i * 60, "end_s": (i + 1) * 60, "text": text})
+        chapter = {
+            "start_s": 0.0,
+            "end_s": 600.0,
+            "title_hint": "中文章节",
+            "segments": segments,
+            "text": " ".join(seg["text"] for seg in segments),
+        }
+        chapter_summaries = [{
+            "title": "中文主题",
+            "summary_en": "Chinese topic summary.",
+            "summary_zh": "中文主题摘要。",
+            "key_points": ["要点一", "要点二"],
+        }]
+        result = gen.generate(
+            source_metadata={},
+            chapters=[chapter],
+            chapter_summaries=chapter_summaries,
+            overall_summary=_make_overall_summary(),
+        )
+        assert result is not None
+        # CJK counting should recognize this as >450 words, triggering refinement.
+        assert len(result["sections"]) >= 2
+        assert "(Part" in result["sections"][0]["title"]
+
+    def test_chapter_without_segments_not_refined(self) -> None:
+        """If chapter has no segments data, it passes through without refinement."""
+        gen = StudyPackGenerator(_make_settings())
+        # 10-minute chapter but no segments.
+        chapter = {"start_s": 0, "end_s": 600, "text": "no segments"}
+        chapter_summaries = [{
+            "title": "NoSegs", "summary_en": "S", "summary_zh": "Z", "key_points": [],
+        }]
+        result = gen.generate(
+            source_metadata={},
+            chapters=[chapter],
+            chapter_summaries=chapter_summaries,
+            overall_summary=_make_overall_summary(),
+        )
+        assert result is not None
+        assert len(result["sections"]) == 1
+
+
+# ---------------------------------------------------------------------------
 # Markdown renderer tests
 # ---------------------------------------------------------------------------
 
