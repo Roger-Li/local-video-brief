@@ -9,11 +9,18 @@ import httpx
 import pytest
 
 from backend.app.core.config import Settings
+from backend.app.core.style_presets import STYLE_PRESETS
 from backend.app.services.summarizer import (
     MlxQwenSummaryGenerator,
     OmlxSummaryGenerator,
     RuleBasedSummaryGenerator,
+    _build_chapter_synthesis_system,
+    _build_chunk_note_user,
+    _build_chapter_synthesis_user,
+    _build_overall_synthesis_system,
+    _build_overall_synthesis_user,
     _choose_strategy,
+    _resolve_preset,
     _validate_single_shot_payload,
     build_summarizer_prompt,
     compute_max_tokens,
@@ -591,6 +598,216 @@ class TestChooseStrategy:
             {"text": "B" * 100, "segments": []},
         ]
         assert _choose_strategy(chapters, 18000) == "hierarchical"
+
+
+# ---------------------------------------------------------------------------
+# Configurable prompts tests
+# ---------------------------------------------------------------------------
+
+class TestPresetResolution:
+    def test_resolve_default(self):
+        assert _resolve_preset(None) == STYLE_PRESETS["default"]
+
+    def test_resolve_known(self):
+        assert _resolve_preset("detailed") == STYLE_PRESETS["detailed"]
+
+    def test_resolve_unknown_falls_back(self):
+        assert _resolve_preset("nonexistent") == STYLE_PRESETS["default"]
+
+
+class TestPromptParameterization:
+    def test_default_preset_matches_original_output(self):
+        """Default preset reproduces exact same text as the old hardcoded prompts."""
+        settings = Settings()
+        system_msg, user_msg = build_summarizer_prompt(
+            settings, SAMPLE_METADATA, SAMPLE_CHAPTERS, ["en", "zh-CN"],
+        )
+        assert '"2-4 sentence English summary of this chapter."' in system_msg
+        assert '"2-4 sentence Chinese summary of this chapter."' in system_msg
+        assert '"3-5 sentence English summary of the entire video."' in system_msg
+        assert '"3-5 sentence Chinese summary of the entire video."' in system_msg
+        assert "(3-5 sentences each)" in system_msg
+
+    def test_detailed_preset_schema_example(self):
+        settings = Settings()
+        preset = STYLE_PRESETS["detailed"]
+        system_msg, _ = build_summarizer_prompt(
+            settings, SAMPLE_METADATA, SAMPLE_CHAPTERS, ["en", "zh-CN"],
+            preset=preset,
+        )
+        assert '"5-7 sentence English summary of this chapter."' in system_msg
+        assert '"5-8 sentence English summary of the entire video."' in system_msg
+        assert "(5-7 sentences each)" in system_msg
+
+    def test_concise_preset_schema_example(self):
+        settings = Settings()
+        preset = STYLE_PRESETS["concise"]
+        system_msg, _ = build_summarizer_prompt(
+            settings, SAMPLE_METADATA, SAMPLE_CHAPTERS, ["en", "zh-CN"],
+            preset=preset,
+        )
+        assert '"1-2 sentence English summary of this chapter."' in system_msg
+        assert '"2-3 sentence English summary of the entire video."' in system_msg
+        assert "(1-2 sentences each)" in system_msg
+
+    def test_style_suffix_appended(self):
+        settings = Settings()
+        preset = STYLE_PRESETS["technical"]
+        system_msg, _ = build_summarizer_prompt(
+            settings, SAMPLE_METADATA, SAMPLE_CHAPTERS, ["en", "zh-CN"],
+            preset=preset,
+        )
+        assert "technical details" in system_msg.lower()
+
+    def test_focus_hint_in_user_msg_not_system(self):
+        settings = Settings()
+        system_msg, user_msg = build_summarizer_prompt(
+            settings, SAMPLE_METADATA, SAMPLE_CHAPTERS, ["en", "zh-CN"],
+            focus_hint="Emphasize mathematical proofs",
+        )
+        assert "Content focus: Emphasize mathematical proofs" in user_msg
+        assert "Emphasize mathematical proofs" not in system_msg
+
+    def test_no_focus_hint_unchanged(self):
+        settings = Settings()
+        _, user_msg = build_summarizer_prompt(
+            settings, SAMPLE_METADATA, SAMPLE_CHAPTERS, ["en", "zh-CN"],
+        )
+        assert "Content focus:" not in user_msg
+
+
+class TestChapterSynthesisSystem:
+    def test_default_contains_2_4(self):
+        system = _build_chapter_synthesis_system()
+        assert "2-4 sentence English summary" in system
+        assert "2-4 sentence Chinese summary" in system
+
+    def test_concise_contains_1_2(self):
+        system = _build_chapter_synthesis_system(STYLE_PRESETS["concise"])
+        assert "1-2 sentence English summary" in system
+        assert "1-2 sentence Chinese summary" in system
+
+    def test_detailed_appends_suffix(self):
+        system = _build_chapter_synthesis_system(STYLE_PRESETS["detailed"])
+        assert "thorough summaries" in system.lower()
+
+
+class TestOverallSynthesisSystem:
+    def test_default_contains_3_5(self):
+        system = _build_overall_synthesis_system()
+        assert "3-5 sentence English summary" in system
+
+    def test_detailed_contains_5_8(self):
+        system = _build_overall_synthesis_system(STYLE_PRESETS["detailed"])
+        assert "5-8 sentence English summary" in system
+
+
+class TestFocusHintInSubPrompts:
+    def test_chunk_note_user_with_focus(self):
+        msg = _build_chunk_note_user("text", "Chapter 1", 0, 2, focus_hint="math proofs")
+        assert "Content focus: math proofs" in msg
+
+    def test_chunk_note_user_without_focus(self):
+        msg = _build_chunk_note_user("text", "Chapter 1", 0, 2)
+        assert "Content focus:" not in msg
+
+    def test_chapter_synthesis_user_with_focus(self):
+        msg = _build_chapter_synthesis_user(SAMPLE_CHAPTERS[0], ["note"], focus_hint="math proofs")
+        assert "Content focus: math proofs" in msg
+
+    def test_chapter_synthesis_user_without_focus(self):
+        msg = _build_chapter_synthesis_user(SAMPLE_CHAPTERS[0], ["note"])
+        assert "Content focus:" not in msg
+
+    def test_overall_synthesis_user_with_focus(self):
+        msg = _build_overall_synthesis_user(SAMPLE_METADATA, [VALID_CHAPTER_SUMMARY], focus_hint="math proofs")
+        assert "Content focus: math proofs" in msg
+
+    def test_overall_synthesis_user_without_focus(self):
+        msg = _build_overall_synthesis_user(SAMPLE_METADATA, [VALID_CHAPTER_SUMMARY])
+        assert "Content focus:" not in msg
+
+
+class TestTokenBudgetMultiplier:
+    def test_compute_max_tokens_with_multiplier(self):
+        settings = Settings()
+        base = compute_max_tokens(settings, 1, 1.0)
+        scaled = compute_max_tokens(settings, 1, 1.5)
+        # With 1 chapter, base = max(2048, 2048) = 2048
+        # scaled = min(3072, 2048 + 2048) = 3072
+        assert scaled == int(base * 1.5)
+
+    def test_compute_max_tokens_capped_for_large_chapters(self):
+        """Multiplier is capped at base + summarizer_max_tokens to avoid exceeding provider limits."""
+        settings = Settings()
+        # 5 chapters: base = max(2048, 1024*5+1024) = 6144
+        # detailed 1.5x: int(6144*1.5) = 9216, cap = 6144+2048 = 8192
+        result = compute_max_tokens(settings, 5, 1.5)
+        assert result == 8192
+        # Verify it's the cap, not the raw scaled value
+        base = compute_max_tokens(settings, 5, 1.0)
+        assert result < int(base * 1.5)
+
+    def test_step_tokens_with_multiplier(self):
+        settings = _omlx_settings()
+        gen = OmlxSummaryGenerator(settings)
+        base = gen._step_tokens(1.0)
+        assert gen._step_tokens(0.6) == int(base * 0.6)
+
+    def test_chunk_note_tokens_with_multiplier(self):
+        settings = _omlx_settings()
+        gen = OmlxSummaryGenerator(settings)
+        base = gen._chunk_note_tokens(1.0)
+        assert gen._chunk_note_tokens(1.5) == int(base * 1.5)
+
+    def test_step_tokens_default_value(self):
+        settings = _omlx_settings()
+        gen = OmlxSummaryGenerator(settings)
+        expected = max(1024, settings.summarizer_max_tokens // 2)
+        assert gen._step_tokens(0.6) == int(expected * 0.6)
+
+    def test_chunk_note_tokens_default_value(self):
+        settings = _omlx_settings()
+        gen = OmlxSummaryGenerator(settings)
+        expected = max(512, settings.summarizer_max_tokens // 4)
+        assert gen._chunk_note_tokens(1.5) == int(expected * 1.5)
+
+
+class TestOmlxModelOverride:
+    def test_model_override_changes_request_body(self):
+        settings = _omlx_settings()
+        gen = OmlxSummaryGenerator(settings)
+        response = _make_openai_response(json.dumps(VALID_SUMMARY))
+        with patch("httpx.post", return_value=response) as mock_post:
+            gen.summarize(
+                SAMPLE_METADATA, SAMPLE_SEGMENTS, SAMPLE_CHAPTERS, ["en", "zh-CN"],
+                job_options={"omlx_model_override": "custom-model"},
+            )
+        body = mock_post.call_args[1]["json"]
+        assert body["model"] == "custom-model"
+
+    def test_no_model_override_uses_settings(self):
+        settings = _omlx_settings()
+        gen = OmlxSummaryGenerator(settings)
+        response = _make_openai_response(json.dumps(VALID_SUMMARY))
+        with patch("httpx.post", return_value=response) as mock_post:
+            gen.summarize(SAMPLE_METADATA, SAMPLE_SEGMENTS, SAMPLE_CHAPTERS, ["en", "zh-CN"])
+        body = mock_post.call_args[1]["json"]
+        assert body["model"] == "test-model"
+
+
+class TestRuleBasedIgnoresOptions:
+    def test_rule_based_ignores_prompt_options(self):
+        settings = Settings()
+        gen = RuleBasedSummaryGenerator(settings)
+        result_default = gen.summarize(
+            SAMPLE_METADATA, SAMPLE_SEGMENTS, SAMPLE_CHAPTERS, ["en"],
+        )
+        result_with_opts = gen.summarize(
+            SAMPLE_METADATA, SAMPLE_SEGMENTS, SAMPLE_CHAPTERS, ["en"],
+            job_options={"style_preset": "detailed", "focus_hint": "math proofs"},
+        )
+        assert result_default == result_with_opts
 
     def test_at_utilisation_boundary_returns_single_shot(self):
         # 12600 chars = 18000 * 0.7 exactly -> should be single_shot

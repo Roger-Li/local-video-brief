@@ -1,12 +1,34 @@
 from __future__ import annotations
 
-from pydantic import BaseModel, Field, HttpUrl
+from pydantic import BaseModel, Field, HttpUrl, field_validator
 from typing import Any, Dict, List, Optional
+
+from backend.app.core.style_presets import STYLE_PRESETS
 
 
 class JobOptions(BaseModel):
     enable_study_pack: Optional[bool] = None
     enable_transcript_normalization: Optional[bool] = None
+    focus_hint: Optional[str] = None
+    style_preset: Optional[str] = None
+    omlx_model_override: Optional[str] = None
+
+    @field_validator("style_preset")
+    @classmethod
+    def validate_style_preset(cls, v: str | None) -> str | None:
+        if v is not None and v not in STYLE_PRESETS:
+            raise ValueError(f"Unknown style preset: {v!r}. Must be one of: {', '.join(sorted(STYLE_PRESETS))}")
+        return v
+
+    @field_validator("focus_hint")
+    @classmethod
+    def validate_focus_hint(cls, v: str | None) -> str | None:
+        if v is not None:
+            v = v.strip()
+            if len(v) > 500:
+                raise ValueError("focus_hint must be 500 characters or fewer")
+            return v if v else None
+        return v
 
 
 class CreateJobRequest(BaseModel):

@@ -1,22 +1,34 @@
 import { useState } from "react";
-import type { JobOptions } from "../types/api";
+import type { JobOptions, ServerConfig } from "../types/api";
 
 interface JobFormProps {
   onSubmit: (payload: { url: string; output_languages: string[]; mode: "captions_first"; options?: JobOptions }) => void;
   isPending: boolean;
+  serverConfig?: ServerConfig;
 }
 
-export function JobForm({ onSubmit, isPending }: JobFormProps) {
+export function JobForm({ onSubmit, isPending, serverConfig }: JobFormProps) {
   const [url, setUrl] = useState("");
   const [showOptions, setShowOptions] = useState(false);
   const [enableStudyPack, setEnableStudyPack] = useState<boolean | null>(null);
   const [enableNormalization, setEnableNormalization] = useState<boolean | null>(null);
+  const [stylePreset, setStylePreset] = useState<string | null>(null);
+  const [focusHint, setFocusHint] = useState("");
+  const [modelOverride, setModelOverride] = useState("");
+
+  const supportsPrompts = serverConfig?.supports_prompt_customization ?? false;
+  const allowModelOverride = serverConfig?.model_override_allowed ?? false;
 
   const buildOptions = (): JobOptions | undefined => {
     if (!showOptions) return undefined;
     const opts: JobOptions = {};
     if (enableStudyPack !== null) opts.enable_study_pack = enableStudyPack;
     if (enableNormalization !== null) opts.enable_transcript_normalization = enableNormalization;
+    if (supportsPrompts) {
+      if (stylePreset !== null) opts.style_preset = stylePreset;
+      if (focusHint.trim()) opts.focus_hint = focusHint.trim();
+      if (modelOverride.trim()) opts.omlx_model_override = modelOverride.trim();
+    }
     return Object.keys(opts).length > 0 ? opts : undefined;
   };
 
@@ -81,6 +93,56 @@ export function JobForm({ onSubmit, isPending }: JobFormProps) {
               onChange={(e) => setEnableNormalization(e.target.checked)}
             />
           </label>
+
+          {supportsPrompts && (
+            <>
+              <div className="options-section-label">Summarization</div>
+
+              <div className="preset-row">
+                {(serverConfig?.style_presets ?? []).map((p) => (
+                  <button
+                    key={p.id}
+                    type="button"
+                    className={`preset-pill ${
+                      (stylePreset === null && p.id === "default") || stylePreset === p.id
+                        ? "preset-pill-active"
+                        : ""
+                    }`}
+                    title={p.description}
+                    onClick={() => setStylePreset(p.id === "default" ? null : p.id)}
+                  >
+                    {p.label}
+                  </button>
+                ))}
+              </div>
+
+              <div className="focus-hint-field">
+                <label className="field">
+                  <span>Content focus</span>
+                  <textarea
+                    placeholder="E.g., Emphasize the mathematical proofs and derivations..."
+                    value={focusHint}
+                    onChange={(e) => {
+                      if (e.target.value.length <= 500) setFocusHint(e.target.value);
+                    }}
+                  />
+                </label>
+                <span className="char-count">{focusHint.length} / 500</span>
+              </div>
+
+              {allowModelOverride && (
+                <label className="field model-override-field">
+                  <span>Model override</span>
+                  <input
+                    type="text"
+                    placeholder={serverConfig?.current_model ?? "model name"}
+                    value={modelOverride}
+                    onChange={(e) => setModelOverride(e.target.value)}
+                  />
+                </label>
+              )}
+            </>
+          )}
         </div>
       )}
 
@@ -90,4 +152,3 @@ export function JobForm({ onSubmit, isPending }: JobFormProps) {
     </form>
   );
 }
-

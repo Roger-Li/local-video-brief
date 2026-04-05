@@ -8,6 +8,7 @@ from backend.app.core.config import Settings, resolve_job_setting
 from backend.app.db.database import initialize_database
 from backend.app.main import app
 from backend.app.repositories.job_repository import JobRepository
+import pytest
 from backend.app.schemas.jobs import CreateJobRequest, JobOptions, JobStatusResponse
 
 
@@ -187,3 +188,56 @@ def test_job_status_response_options_default_none() -> None:
         updated_at="2026-01-01T00:00:00Z",
     )
     assert resp.options is None
+
+
+# --- Prompt option schema validation ---
+
+def test_focus_hint_accepted_within_limit() -> None:
+    opts = JobOptions(focus_hint="Emphasize math proofs")
+    assert opts.focus_hint == "Emphasize math proofs"
+
+
+def test_focus_hint_rejected_over_500_chars() -> None:
+    with pytest.raises(Exception):
+        JobOptions(focus_hint="x" * 501)
+
+
+def test_focus_hint_strips_whitespace() -> None:
+    opts = JobOptions(focus_hint="  test hint  ")
+    assert opts.focus_hint == "test hint"
+
+
+def test_focus_hint_empty_becomes_none() -> None:
+    opts = JobOptions(focus_hint="   ")
+    assert opts.focus_hint is None
+
+
+def test_style_preset_accepted_for_known_ids() -> None:
+    for preset_id in ("default", "detailed", "concise", "technical", "academic"):
+        opts = JobOptions(style_preset=preset_id)
+        assert opts.style_preset == preset_id
+
+
+def test_style_preset_rejected_for_unknown() -> None:
+    with pytest.raises(Exception):
+        JobOptions(style_preset="nonexistent_preset")
+
+
+def test_omlx_model_override_accepted() -> None:
+    opts = JobOptions(omlx_model_override="qwen2.5-32b")
+    assert opts.omlx_model_override == "qwen2.5-32b"
+
+
+def test_round_trip_new_options() -> None:
+    repo = _make_repo()
+    job = repo.create_job(
+        url="https://example.com",
+        output_languages=["en"],
+        mode="captions_first",
+        options={"style_preset": "detailed", "focus_hint": "math proofs", "omlx_model_override": "qwen2.5-32b"},
+    )
+    fetched = repo.get_job(job.id)
+    assert fetched is not None
+    assert fetched.options["style_preset"] == "detailed"
+    assert fetched.options["focus_hint"] == "math proofs"
+    assert fetched.options["omlx_model_override"] == "qwen2.5-32b"

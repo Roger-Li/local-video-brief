@@ -54,4 +54,5 @@ class SummaryGenerator(Protocol):
         output_languages: List[str],
         artifact_dir: Optional[Path] = None,
         progress_callback: Optional[Callable[[str], None]] = None,
+        job_options: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]: ...

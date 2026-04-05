@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Callable, Optional
 
 from backend.app.core.config import Settings
+from backend.app.core.style_presets import STYLE_PRESETS, StylePreset
 from backend.app.utils.text import chunk_segments, chunk_text, segments_to_text, split_sentences
 
 logger = logging.getLogger(__name__)
@@ -17,13 +18,24 @@ logger = logging.getLogger(__name__)
 # Shared helpers
 # ---------------------------------------------------------------------------
 
+def _resolve_preset(style_preset_id: str | None) -> StylePreset:
+    """Return the preset for the given ID, falling back to default."""
+    if style_preset_id and style_preset_id in STYLE_PRESETS:
+        return STYLE_PRESETS[style_preset_id]
+    return STYLE_PRESETS["default"]
+
+
 def build_summarizer_prompt(
     settings: Settings,
     source_metadata: dict,
     chapters: list[dict],
     output_languages: list[str],
+    preset: StylePreset | None = None,
+    focus_hint: str | None = None,
 ) -> tuple[str, str]:
     """Return (system_msg, user_msg) for summarization."""
+    if preset is None:
+        preset = STYLE_PRESETS["default"]
     chapter_blocks = []
     for chapter in chapters:
         text_chunks = chunk_text(chapter["text"], settings.summarizer_max_input_chars)
@@ -48,14 +60,14 @@ def build_summarizer_prompt(
                     "start_s": 0.0,
                     "end_s": 120.0,
                     "title": "Short descriptive chapter title",
-                    "summary_en": "2-4 sentence English summary of this chapter.",
-                    "summary_zh": "2-4 sentence Chinese summary of this chapter.",
+                    "summary_en": f"{preset.chapter_length} sentence English summary of this chapter.",
+                    "summary_zh": f"{preset.chapter_length} sentence Chinese summary of this chapter.",
                     "key_points": ["key point 1", "key point 2"],
                 }
             ],
             "overall_summary": {
-                "summary_en": "3-5 sentence English summary of the entire video.",
-                "summary_zh": "3-5 sentence Chinese summary of the entire video.",
+                "summary_en": f"{preset.overall_length} sentence English summary of the entire video.",
+                "summary_zh": f"{preset.overall_length} sentence Chinese summary of the entire video.",
                 "highlights": ["highlight 1", "highlight 2", "highlight 3"],
             },
         },
@@ -68,17 +80,21 @@ def build_summarizer_prompt(
         f"{schema_example}\n\n"
         "Rules:\n"
         "- Return one chapter object per input chapter with start_s, end_s, title, summary_en, summary_zh, key_points.\n"
-        "- summary_en and summary_zh must be substantive (3-5 sentences each), not just the first line of the transcript.\n"
+        f"- summary_en and summary_zh must be substantive ({preset.single_shot_chapter_length} sentences each), not just the first line of the transcript.\n"
         "- key_points should capture the main ideas discussed.\n"
         "- overall_summary should cover the full video.\n"
         "- Output ONLY the JSON object. No explanation, no thinking, no markdown fences, no trailing text.\n"
         "- All strings must use valid JSON escaping (double quotes, escaped newlines).\n"
     )
-    user_msg = (
-        f"Target languages: {target_languages}.\n"
-        f"Metadata: {json.dumps(brief_metadata, ensure_ascii=False)}\n"
-        f"Chapters: {json.dumps(chapter_blocks, ensure_ascii=False)}\n"
-    )
+    if preset.system_suffix:
+        system_msg += f"\n{preset.system_suffix}\n"
+    user_msg_parts = []
+    if focus_hint:
+        user_msg_parts.append(f"Content focus: {focus_hint}\n---")
+    user_msg_parts.append(f"Target languages: {target_languages}.")
+    user_msg_parts.append(f"Metadata: {json.dumps(brief_metadata, ensure_ascii=False)}")
+    user_msg_parts.append(f"Chapters: {json.dumps(chapter_blocks, ensure_ascii=False)}")
+    user_msg = "\n".join(user_msg_parts) + "\n"
     return system_msg, user_msg
 
 
@@ -367,9 +383,17 @@ def parse_model_json(raw: str, required_keys: set[str] | None = None) -> dict:
         raise
 
 
-def compute_max_tokens(settings: Settings, chapter_count: int) -> int:
-    """Dynamic max_tokens based on chapter count."""
-    return max(settings.summarizer_max_tokens, 1024 * chapter_count + 1024)
+def compute_max_tokens(settings: Settings, chapter_count: int, multiplier: float = 1.0) -> int:
+    """Dynamic max_tokens based on chapter count.
+
+    The multiplier adds headroom for verbose presets but is capped at
+    base + summarizer_max_tokens to avoid exceeding provider token limits
+    (common on oMLX/OpenAI-compatible deployments).
+    """
+    base = max(settings.summarizer_max_tokens, 1024 * chapter_count + 1024)
+    scaled = int(base * multiplier)
+    cap = base + settings.summarizer_max_tokens
+    return min(scaled, cap)
 
 
 # ---------------------------------------------------------------------------
@@ -444,48 +468,76 @@ _CHUNK_NOTE_SYSTEM = (
 
 
 def _build_chunk_note_user(chunk_text: str, chapter_title: str,
-                           chunk_index: int, total_chunks: int) -> str:
-    return (
+                           chunk_index: int, total_chunks: int,
+                           focus_hint: str | None = None) -> str:
+    msg = (
         f"Chapter: {chapter_title}\n"
         f"Chunk {chunk_index + 1} of {total_chunks}:\n\n"
         f"{chunk_text}"
     )
+    if focus_hint:
+        msg += f"\n---\nContent focus: {focus_hint}"
+    return msg
 
 
-_CHAPTER_SYNTHESIS_SYSTEM = (
-    "You are a multilingual video summarization model.\n"
-    "Given notes from a single chapter, produce a JSON object with these fields:\n"
-    '  "start_s": <float>, "end_s": <float>, "title": "<short title>",\n'
-    '  "summary_en": "<2-4 sentence English summary>",\n'
-    '  "summary_zh": "<2-4 sentence Chinese summary>",\n'
-    '  "key_points": ["point 1", "point 2", ...]\n'
-    "Output ONLY the JSON object. No explanation, no markdown fences.\n"
-    "Use valid JSON escaping for every string value."
-)
+def _build_chapter_synthesis_system(preset: StylePreset | None = None) -> str:
+    if preset is None:
+        preset = STYLE_PRESETS["default"]
+    msg = (
+        "You are a multilingual video summarization model.\n"
+        "Given notes from a single chapter, produce a JSON object with these fields:\n"
+        '  "start_s": <float>, "end_s": <float>, "title": "<short title>",\n'
+        f'  "summary_en": "<{preset.chapter_length} sentence English summary>",\n'
+        f'  "summary_zh": "<{preset.chapter_length} sentence Chinese summary>",\n'
+        '  "key_points": ["point 1", "point 2", ...]\n'
+        "Output ONLY the JSON object. No explanation, no markdown fences.\n"
+        "Use valid JSON escaping for every string value."
+    )
+    if preset.system_suffix:
+        msg += f"\n{preset.system_suffix}"
+    return msg
 
 
-def _build_chapter_synthesis_user(chapter: dict, chunk_notes: list[str]) -> str:
+_CHAPTER_SYNTHESIS_SYSTEM = _build_chapter_synthesis_system()
+
+
+def _build_chapter_synthesis_user(chapter: dict, chunk_notes: list[str],
+                                  focus_hint: str | None = None) -> str:
     notes_block = "\n\n".join(f"[Note {i+1}] {note}" for i, note in enumerate(chunk_notes))
-    return (
+    parts = []
+    if focus_hint:
+        parts.append(f"Content focus: {focus_hint}\n---")
+    parts.append(
         f"Chapter title: {chapter.get('title_hint', 'Untitled')}\n"
         f"Time range: {chapter['start_s']:.1f}s - {chapter['end_s']:.1f}s\n\n"
         f"Notes:\n{notes_block}"
     )
+    return "\n".join(parts)
 
 
-_OVERALL_SYNTHESIS_SYSTEM = (
-    "You are a multilingual video summarization model.\n"
-    "Given chapter summaries, produce a JSON object with these fields:\n"
-    '  "summary_en": "<3-5 sentence English summary of the entire video>",\n'
-    '  "summary_zh": "<3-5 sentence Chinese summary of the entire video>",\n'
-    '  "highlights": ["highlight 1", "highlight 2", "highlight 3"]\n'
-    "Output ONLY the JSON object. No explanation, no markdown fences.\n"
-    "Use valid JSON escaping for every string value."
-)
+def _build_overall_synthesis_system(preset: StylePreset | None = None) -> str:
+    if preset is None:
+        preset = STYLE_PRESETS["default"]
+    msg = (
+        "You are a multilingual video summarization model.\n"
+        "Given chapter summaries, produce a JSON object with these fields:\n"
+        f'  "summary_en": "<{preset.overall_length} sentence English summary of the entire video>",\n'
+        f'  "summary_zh": "<{preset.overall_length} sentence Chinese summary of the entire video>",\n'
+        '  "highlights": ["highlight 1", "highlight 2", "highlight 3"]\n'
+        "Output ONLY the JSON object. No explanation, no markdown fences.\n"
+        "Use valid JSON escaping for every string value."
+    )
+    if preset.system_suffix:
+        msg += f"\n{preset.system_suffix}"
+    return msg
+
+
+_OVERALL_SYNTHESIS_SYSTEM = _build_overall_synthesis_system()
 
 
 def _build_overall_synthesis_user(source_metadata: dict,
-                                  chapter_summaries: list[dict]) -> str:
+                                  chapter_summaries: list[dict],
+                                  focus_hint: str | None = None) -> str:
     brief_metadata = {
         k: source_metadata[k]
         for k in ("title", "description", "duration", "upload_date", "channel", "tags")
@@ -495,10 +547,14 @@ def _build_overall_synthesis_user(source_metadata: dict,
         f"[Ch {i+1}] {ch.get('title', 'Untitled')}: {ch.get('summary_en', '')}"
         for i, ch in enumerate(chapter_summaries)
     )
-    return (
+    parts = []
+    if focus_hint:
+        parts.append(f"Content focus: {focus_hint}\n---")
+    parts.append(
         f"Metadata: {json.dumps(brief_metadata, ensure_ascii=False)}\n\n"
         f"Chapter summaries:\n{chapters_block}"
     )
+    return "\n".join(parts)
 
 
 # ---------------------------------------------------------------------------
@@ -542,37 +598,49 @@ class MlxQwenSummaryGenerator:
 
         return raw_output
 
-    def _chunk_note_tokens(self) -> int:
-        return max(512, self.settings.summarizer_max_tokens // 4)
+    def _chunk_note_tokens(self, multiplier: float = 1.0) -> int:
+        base = max(512, self.settings.summarizer_max_tokens // 4)
+        return int(base * multiplier)
 
-    def _step_tokens(self) -> int:
-        return max(1024, self.settings.summarizer_max_tokens // 2)
+    def _step_tokens(self, multiplier: float = 1.0) -> int:
+        base = max(1024, self.settings.summarizer_max_tokens // 2)
+        return int(base * multiplier)
 
     def _summarize_chunk(self, chunk_text: str, chapter_title: str,
                          chunk_index: int, total_chunks: int,
-                         artifact_dir: Path | None = None) -> str:
-        user_msg = _build_chunk_note_user(chunk_text, chapter_title, chunk_index, total_chunks)
+                         artifact_dir: Path | None = None,
+                         focus_hint: str | None = None,
+                         multiplier: float = 1.0) -> str:
+        user_msg = _build_chunk_note_user(chunk_text, chapter_title, chunk_index, total_chunks, focus_hint=focus_hint)
         raw = self._call_llm(
-            _CHUNK_NOTE_SYSTEM, user_msg, max_tokens=self._chunk_note_tokens(),
+            _CHUNK_NOTE_SYSTEM, user_msg, max_tokens=self._chunk_note_tokens(multiplier),
             artifact_dir=artifact_dir, artifact_label=f"chunk_{chunk_index}",
         )
         return raw.strip()
 
     def _synthesize_chapter(self, chapter: dict, chunk_notes: list[str],
-                            artifact_dir: Path | None = None) -> dict:
-        user_msg = _build_chapter_synthesis_user(chapter, chunk_notes)
+                            artifact_dir: Path | None = None,
+                            preset: StylePreset | None = None,
+                            focus_hint: str | None = None,
+                            multiplier: float = 1.0) -> dict:
+        system_msg = _build_chapter_synthesis_system(preset)
+        user_msg = _build_chapter_synthesis_user(chapter, chunk_notes, focus_hint=focus_hint)
         raw = self._call_llm(
-            _CHAPTER_SYNTHESIS_SYSTEM, user_msg, max_tokens=self._step_tokens(),
+            system_msg, user_msg, max_tokens=self._step_tokens(multiplier),
             artifact_dir=artifact_dir, artifact_label="chapter_synthesis",
         )
         return parse_model_json(raw, required_keys={"start_s", "end_s", "title", "summary_en", "summary_zh", "key_points"})
 
     def _synthesize_overall(self, source_metadata: dict,
                             chapter_summaries: list[dict],
-                            artifact_dir: Path | None = None) -> dict:
-        user_msg = _build_overall_synthesis_user(source_metadata, chapter_summaries)
+                            artifact_dir: Path | None = None,
+                            preset: StylePreset | None = None,
+                            focus_hint: str | None = None,
+                            multiplier: float = 1.0) -> dict:
+        system_msg = _build_overall_synthesis_system(preset)
+        user_msg = _build_overall_synthesis_user(source_metadata, chapter_summaries, focus_hint=focus_hint)
         raw = self._call_llm(
-            _OVERALL_SYNTHESIS_SYSTEM, user_msg, max_tokens=self._step_tokens(),
+            system_msg, user_msg, max_tokens=self._step_tokens(multiplier),
             artifact_dir=artifact_dir, artifact_label="overall_synthesis",
         )
         return parse_model_json(raw, required_keys={"summary_en", "summary_zh", "highlights"})
@@ -583,12 +651,16 @@ class MlxQwenSummaryGenerator:
         chapters: list[dict],
         output_languages: list[str],
         artifact_dir: Optional[Path] = None,
+        preset: StylePreset | None = None,
+        focus_hint: str | None = None,
+        multiplier: float = 1.0,
     ) -> dict:
         """Single-shot summarization: all chapters in one prompt, one LLM call."""
         system_msg, user_msg = build_summarizer_prompt(
             self.settings, source_metadata, chapters, output_languages,
+            preset=preset, focus_hint=focus_hint,
         )
-        max_tokens = compute_max_tokens(self.settings, len(chapters))
+        max_tokens = compute_max_tokens(self.settings, len(chapters), multiplier)
         raw = self._call_llm(
             system_msg, user_msg, max_tokens=max_tokens,
             artifact_dir=artifact_dir, artifact_label="single_shot",
@@ -604,7 +676,13 @@ class MlxQwenSummaryGenerator:
         output_languages: list[str],
         artifact_dir: Optional[Path] = None,
         progress_callback: Optional[Callable[[str], None]] = None,
+        job_options: dict | None = None,
     ) -> dict:
+        opts = job_options or {}
+        preset = _resolve_preset(opts.get("style_preset"))
+        focus_hint = opts.get("focus_hint")
+        multiplier = preset.max_tokens_multiplier
+
         fallback = RuleBasedSummaryGenerator(self.settings)
         try:
             self._ensure_model_loaded()
@@ -623,6 +701,7 @@ class MlxQwenSummaryGenerator:
                     progress_callback("summarizing_single_shot")
                 return self._single_shot(
                     source_metadata, chapters, output_languages, artifact_dir=artifact_dir,
+                    preset=preset, focus_hint=focus_hint, multiplier=multiplier,
                 )
 
             # --- Per-chapter / hierarchical paths ---
@@ -649,6 +728,7 @@ class MlxQwenSummaryGenerator:
                             note = self._summarize_chunk(
                                 text, chapter.get("title_hint", ""),
                                 c_idx, len(seg_chunks), artifact_dir=ch_artifact,
+                                focus_hint=focus_hint, multiplier=multiplier,
                             )
                         except Exception as exc:
                             logger.warning(
@@ -666,7 +746,10 @@ class MlxQwenSummaryGenerator:
                     progress_callback("synthesizing_chapters")
 
                 try:
-                    ch_summary = self._synthesize_chapter(chapter, notes, artifact_dir=ch_artifact)
+                    ch_summary = self._synthesize_chapter(
+                        chapter, notes, artifact_dir=ch_artifact,
+                        preset=preset, focus_hint=focus_hint, multiplier=multiplier,
+                    )
                 except Exception as exc:
                     logger.warning(
                         "mlx chapter synthesis failed for chapter=%d (%s: %s), using rule-based chapter fallback",
@@ -681,7 +764,10 @@ class MlxQwenSummaryGenerator:
                 progress_callback("synthesizing_overall")
 
             try:
-                overall = self._synthesize_overall(source_metadata, chapter_summaries, artifact_dir=artifact_dir)
+                overall = self._synthesize_overall(
+                    source_metadata, chapter_summaries, artifact_dir=artifact_dir,
+                    preset=preset, focus_hint=focus_hint, multiplier=multiplier,
+                )
             except Exception as exc:
                 logger.warning(
                     "mlx overall synthesis failed (%s: %s), using rule-based overall fallback",
@@ -761,14 +847,16 @@ class OmlxSummaryGenerator:
         max_tokens: int,
         artifact_dir: Path | None = None,
         artifact_label: str = "",
+        model_override: str | None = None,
     ) -> str:
         """Send messages to oMLX server, save artifacts, return raw text."""
         import httpx
 
         label = f"_{artifact_label}" if artifact_label else ""
+        model = model_override or self.settings.omlx_model
 
         request_body = {
-            "model": self.settings.omlx_model,
+            "model": model,
             "messages": [
                 {"role": "system", "content": system_msg},
                 {"role": "user", "content": user_msg},
@@ -791,7 +879,7 @@ class OmlxSummaryGenerator:
         if self.settings.omlx_api_key:
             headers["Authorization"] = f"Bearer {self.settings.omlx_api_key}"
 
-        logger.info("omlx request%s: url=%s model=%s max_tokens=%d", label, url, self.settings.omlx_model, max_tokens)
+        logger.info("omlx request%s: url=%s model=%s max_tokens=%d", label, url, model, max_tokens)
         t0 = time.perf_counter()
         response = httpx.post(
             url,
@@ -811,38 +899,56 @@ class OmlxSummaryGenerator:
 
         return raw_output
 
-    def _chunk_note_tokens(self) -> int:
-        return max(512, self.settings.summarizer_max_tokens // 4)
+    def _chunk_note_tokens(self, multiplier: float = 1.0) -> int:
+        base = max(512, self.settings.summarizer_max_tokens // 4)
+        return int(base * multiplier)
 
-    def _step_tokens(self) -> int:
-        return max(1024, self.settings.summarizer_max_tokens // 2)
+    def _step_tokens(self, multiplier: float = 1.0) -> int:
+        base = max(1024, self.settings.summarizer_max_tokens // 2)
+        return int(base * multiplier)
 
     def _summarize_chunk(self, chunk_text: str, chapter_title: str,
                          chunk_index: int, total_chunks: int,
-                         artifact_dir: Path | None = None) -> str:
-        user_msg = _build_chunk_note_user(chunk_text, chapter_title, chunk_index, total_chunks)
+                         artifact_dir: Path | None = None,
+                         focus_hint: str | None = None,
+                         multiplier: float = 1.0,
+                         model_override: str | None = None) -> str:
+        user_msg = _build_chunk_note_user(chunk_text, chapter_title, chunk_index, total_chunks, focus_hint=focus_hint)
         raw = self._call_omlx(
-            _CHUNK_NOTE_SYSTEM, user_msg, max_tokens=self._chunk_note_tokens(),
+            _CHUNK_NOTE_SYSTEM, user_msg, max_tokens=self._chunk_note_tokens(multiplier),
             artifact_dir=artifact_dir, artifact_label=f"chunk_{chunk_index}",
+            model_override=model_override,
         )
         return raw.strip()
 
     def _synthesize_chapter(self, chapter: dict, chunk_notes: list[str],
-                            artifact_dir: Path | None = None) -> dict:
-        user_msg = _build_chapter_synthesis_user(chapter, chunk_notes)
+                            artifact_dir: Path | None = None,
+                            preset: StylePreset | None = None,
+                            focus_hint: str | None = None,
+                            multiplier: float = 1.0,
+                            model_override: str | None = None) -> dict:
+        system_msg = _build_chapter_synthesis_system(preset)
+        user_msg = _build_chapter_synthesis_user(chapter, chunk_notes, focus_hint=focus_hint)
         raw = self._call_omlx(
-            _CHAPTER_SYNTHESIS_SYSTEM, user_msg, max_tokens=self._step_tokens(),
+            system_msg, user_msg, max_tokens=self._step_tokens(multiplier),
             artifact_dir=artifact_dir, artifact_label="chapter_synthesis",
+            model_override=model_override,
         )
         return parse_model_json(raw, required_keys={"start_s", "end_s", "title", "summary_en", "summary_zh", "key_points"})
 
     def _synthesize_overall(self, source_metadata: dict,
                             chapter_summaries: list[dict],
-                            artifact_dir: Path | None = None) -> dict:
-        user_msg = _build_overall_synthesis_user(source_metadata, chapter_summaries)
+                            artifact_dir: Path | None = None,
+                            preset: StylePreset | None = None,
+                            focus_hint: str | None = None,
+                            multiplier: float = 1.0,
+                            model_override: str | None = None) -> dict:
+        system_msg = _build_overall_synthesis_system(preset)
+        user_msg = _build_overall_synthesis_user(source_metadata, chapter_summaries, focus_hint=focus_hint)
         raw = self._call_omlx(
-            _OVERALL_SYNTHESIS_SYSTEM, user_msg, max_tokens=self._step_tokens(),
+            system_msg, user_msg, max_tokens=self._step_tokens(multiplier),
             artifact_dir=artifact_dir, artifact_label="overall_synthesis",
+            model_override=model_override,
         )
         return parse_model_json(raw, required_keys={"summary_en", "summary_zh", "highlights"})
 
@@ -852,15 +958,21 @@ class OmlxSummaryGenerator:
         chapters: list[dict],
         output_languages: list[str],
         artifact_dir: Optional[Path] = None,
+        preset: StylePreset | None = None,
+        focus_hint: str | None = None,
+        multiplier: float = 1.0,
+        model_override: str | None = None,
     ) -> dict:
         """Single-shot summarization: all chapters in one prompt, one LLM call."""
         system_msg, user_msg = build_summarizer_prompt(
             self.settings, source_metadata, chapters, output_languages,
+            preset=preset, focus_hint=focus_hint,
         )
-        max_tokens = compute_max_tokens(self.settings, len(chapters))
+        max_tokens = compute_max_tokens(self.settings, len(chapters), multiplier)
         raw = self._call_omlx(
             system_msg, user_msg, max_tokens=max_tokens,
             artifact_dir=artifact_dir, artifact_label="single_shot",
+            model_override=model_override,
         )
         parsed = parse_model_json(raw, required_keys={"chapters", "overall_summary"})
         return _validate_single_shot_payload(parsed, expected_chapters=len(chapters))
@@ -873,7 +985,14 @@ class OmlxSummaryGenerator:
         output_languages: list[str],
         artifact_dir: Optional[Path] = None,
         progress_callback: Optional[Callable[[str], None]] = None,
+        job_options: dict | None = None,
     ) -> dict:
+        opts = job_options or {}
+        preset = _resolve_preset(opts.get("style_preset"))
+        focus_hint = opts.get("focus_hint")
+        multiplier = preset.max_tokens_multiplier
+        model_override = opts.get("omlx_model_override") or None
+
         fallback = RuleBasedSummaryGenerator(self.settings)
         try:
             max_input_chars = self.settings.summarizer_max_input_chars
@@ -891,6 +1010,8 @@ class OmlxSummaryGenerator:
                     progress_callback("summarizing_single_shot")
                 return self._single_shot(
                     source_metadata, chapters, output_languages, artifact_dir=artifact_dir,
+                    preset=preset, focus_hint=focus_hint, multiplier=multiplier,
+                    model_override=model_override,
                 )
 
             # --- Per-chapter / hierarchical paths ---
@@ -915,6 +1036,8 @@ class OmlxSummaryGenerator:
                             note = self._summarize_chunk(
                                 text, chapter.get("title_hint", ""),
                                 c_idx, len(seg_chunks), artifact_dir=ch_artifact,
+                                focus_hint=focus_hint, multiplier=multiplier,
+                                model_override=model_override,
                             )
                         except Exception as exc:
                             logger.warning(
@@ -932,7 +1055,11 @@ class OmlxSummaryGenerator:
                     progress_callback("synthesizing_chapters")
 
                 try:
-                    ch_summary = self._synthesize_chapter(chapter, notes, artifact_dir=ch_artifact)
+                    ch_summary = self._synthesize_chapter(
+                        chapter, notes, artifact_dir=ch_artifact,
+                        preset=preset, focus_hint=focus_hint, multiplier=multiplier,
+                        model_override=model_override,
+                    )
                 except Exception as exc:
                     logger.warning(
                         "omlx chapter synthesis failed for chapter=%d (%s: %s), using rule-based chapter fallback",
@@ -947,7 +1074,11 @@ class OmlxSummaryGenerator:
                 progress_callback("synthesizing_overall")
 
             try:
-                overall = self._synthesize_overall(source_metadata, chapter_summaries, artifact_dir=artifact_dir)
+                overall = self._synthesize_overall(
+                    source_metadata, chapter_summaries, artifact_dir=artifact_dir,
+                    preset=preset, focus_hint=focus_hint, multiplier=multiplier,
+                    model_override=model_override,
+                )
             except Exception as exc:
                 logger.warning(
                     "omlx overall synthesis failed (%s: %s), using rule-based overall fallback",
@@ -999,6 +1130,7 @@ class RuleBasedSummaryGenerator:
         output_languages: list[str],
         artifact_dir: Optional[Path] = None,
         progress_callback: Optional[Callable[[str], None]] = None,
+        job_options: dict | None = None,
     ) -> dict:
         chapter_summaries = []
         for index, chapter in enumerate(chapters, start=1):

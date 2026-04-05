@@ -12,6 +12,7 @@ logging.basicConfig(
 )
 from fastapi.middleware.cors import CORSMiddleware
 
+from backend.app.api.config import router as config_router
 from backend.app.api.jobs import router as jobs_router
 from backend.app.core.config import get_settings
 from backend.app.db.database import get_connection, initialize_database
@@ -63,6 +64,7 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title=get_settings().app_name, lifespan=lifespan)
+app.include_router(config_router)
 app.include_router(jobs_router)
 app.add_middleware(
     CORSMiddleware,

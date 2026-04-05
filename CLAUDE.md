@@ -43,7 +43,7 @@ This repository builds a local-first video summary tool for Apple Silicon Macs. 
 
 ## Testing Expectations
 
-- Run backend tests with `python3 -m pytest backend/tests` (157 tests).
+- Run backend tests with `python3 -m pytest backend/tests` (205 tests).
 - For real end-to-end validation, run:
 
 ```bash
@@ -74,9 +74,19 @@ OVS_TEST_SUMMARIZER_PROVIDER=omlx OVS_OMLX_BASE_URL=http://localhost:8080/v1 OVS
 ## Per-Job Options
 
 - Optional per-job overrides via `options` field on `CreateJobRequest`. When omitted, all settings fall back to server defaults.
-- Two options: `enable_study_pack`, `enable_transcript_normalization`. `null` = use server default.
+- Five options: `enable_study_pack`, `enable_transcript_normalization`, `style_preset`, `focus_hint`, `omlx_model_override`. `null` = use server default.
 - `summarizer_provider` is **not** per-job — the MLX provider loads a multi-GB model into GPU memory at startup.
-- Frontend: collapsible "Options" section in `JobForm.tsx` below the URL field.
+- Frontend: collapsible "Options" section in `JobForm.tsx` below the URL field. Prompt controls (presets, focus hint, model override) are capability-gated via `GET /config`.
+
+## Configurable Prompts
+
+- Style presets (`default`, `detailed`, `concise`, `technical`, `academic`) in `backend/app/core/style_presets.py`. Each preset owns sentence-length guidance, a system suffix, and a token-budget multiplier.
+- The `default` preset reproduces the original hardcoded prompt text byte-for-byte.
+- Focus hints go in user messages (not system) to avoid conflicting with JSON schema enforcement. They are threaded through all prompt paths: single-shot, chunk notes, chapter synthesis, and overall synthesis.
+- Token multiplier is applied to `compute_max_tokens()`, `_step_tokens()`, and `_chunk_note_tokens()`. Single-shot tokens are clamped to `base + summarizer_max_tokens` to avoid exceeding provider completion-token limits.
+- `omlx_model_override` changes the `model` field in oMLX HTTP requests. Ignored by MLX and fallback providers.
+- `GET /config` returns capability flags (`supports_prompt_customization`, `model_override_allowed`) so the frontend hides inert controls. For MLX, checks runtime availability of `mlx_lm` before advertising support.
+- The API always accepts and stores prompt options regardless of provider. Only LLM providers act on them.
 
 ## Known Limitations
 

@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { useMutation, useQuery } from "@tanstack/react-query";
-import { createJob, getJob, getJobResult } from "./lib/api";
+import { createJob, getConfig, getJob, getJobResult } from "./lib/api";
 import { JobForm } from "./components/JobForm";
 import { JobStatusCard } from "./components/JobStatusCard";
 import { ResultView } from "./components/ResultView";
@@ -8,6 +8,12 @@ import type { CreateJobRequest } from "./types/api";
 
 export default function App() {
   const [jobId, setJobId] = useState<string | null>(null);
+
+  const configQuery = useQuery({
+    queryKey: ["config"],
+    queryFn: getConfig,
+    staleTime: Infinity,
+  });
 
   const createJobMutation = useMutation({
     mutationFn: (payload: CreateJobRequest) => createJob(payload),
@@ -36,7 +42,7 @@ export default function App() {
     <main className="app-shell">
       <div className="hero-background" />
       <section className="content-stack">
-        <JobForm onSubmit={(payload: CreateJobRequest) => createJobMutation.mutate(payload)} isPending={createJobMutation.isPending} />
+        <JobForm onSubmit={(payload: CreateJobRequest) => createJobMutation.mutate(payload)} isPending={createJobMutation.isPending} serverConfig={configQuery.data} />
 
         {createJobMutation.isError ? (
           <p className="error-banner">{(createJobMutation.error as Error).message}</p>

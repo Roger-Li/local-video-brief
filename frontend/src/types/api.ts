@@ -3,6 +3,23 @@ export type JobStatus = "queued" | "running" | "completed" | "failed";
 export interface JobOptions {
   enable_study_pack?: boolean;
   enable_transcript_normalization?: boolean;
+  focus_hint?: string;
+  style_preset?: string;
+  omlx_model_override?: string;
+}
+
+export interface StylePresetInfo {
+  id: string;
+  label: string;
+  description: string;
+}
+
+export interface ServerConfig {
+  summarizer_provider: string;
+  current_model: string | null;
+  model_override_allowed: boolean;
+  supports_prompt_customization: boolean;
+  style_presets: StylePresetInfo[];
 }
 
 export interface CreateJobRequest {
