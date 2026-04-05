@@ -11,9 +11,10 @@ Local-first video summarization for Apple Silicon Macs. The app ingests YouTube,
 
 ## Repo Layout
 
-- `docs/video-summary-implementation-plan.md`: implementation contract
 - `backend/`: FastAPI app, job worker, persistence, and pipeline services
 - `frontend/`: React UI for job submission and result inspection
+- `docs/specs/`: completed feature design docs (historical reference)
+- `docs/roadmap.md`: shipped features and future plans
 
 ## Local Setup
 
@@ -47,6 +48,21 @@ cd frontend
 pnpm install
 pnpm dev
 ```
+
+## Dev Server
+
+Launch both backend and frontend in one terminal:
+
+```bash
+./scripts/dev_server.sh
+```
+
+This kills stale processes on the target ports, starts the backend on `8010` (avoiding conflict with oMLX on `8000`), waits for it to be healthy, then starts the Vite frontend on `5173` with the correct API URL. Ctrl-C shuts both down.
+
+| Variable | Default | Description |
+|---|---|---|
+| `OVS_DEV_BACKEND_PORT` | `8010` | Backend port |
+| `OVS_DEV_PYTHON` | *(auto)* | Python interpreter (`~/ml-env` > `.venv` > `python3`) |
 
 ## Environment
 
