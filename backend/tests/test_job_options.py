@@ -228,6 +228,63 @@ def test_omlx_model_override_accepted() -> None:
     assert opts.omlx_model_override == "qwen2.5-32b"
 
 
+# --- Power mode option validation ---
+
+def test_power_mode_accepted() -> None:
+    opts = JobOptions(power_mode=True)
+    assert opts.power_mode is True
+
+
+def test_power_prompt_accepted_within_limit() -> None:
+    opts = JobOptions(power_prompt="Summarize as bullet points")
+    assert opts.power_prompt == "Summarize as bullet points"
+
+
+def test_power_prompt_rejected_over_2000_chars() -> None:
+    with pytest.raises(Exception):
+        JobOptions(power_prompt="x" * 2001)
+
+
+def test_power_prompt_strips_whitespace() -> None:
+    opts = JobOptions(power_prompt="  brief text  ")
+    assert opts.power_prompt == "brief text"
+
+
+def test_power_prompt_empty_becomes_none() -> None:
+    opts = JobOptions(power_prompt="   ")
+    assert opts.power_prompt is None
+
+
+def test_strategy_override_auto() -> None:
+    opts = JobOptions(strategy_override="auto")
+    assert opts.strategy_override == "auto"
+
+
+def test_strategy_override_force_single_shot() -> None:
+    opts = JobOptions(strategy_override="force_single_shot")
+    assert opts.strategy_override == "force_single_shot"
+
+
+def test_strategy_override_invalid_rejected() -> None:
+    with pytest.raises(Exception):
+        JobOptions(strategy_override="invalid_strategy")
+
+
+def test_power_options_round_trip() -> None:
+    repo = _make_repo()
+    job = repo.create_job(
+        url="https://example.com",
+        output_languages=["en"],
+        mode="captions_first",
+        options={"power_mode": True, "power_prompt": "test brief", "strategy_override": "force_single_shot"},
+    )
+    fetched = repo.get_job(job.id)
+    assert fetched is not None
+    assert fetched.options["power_mode"] is True
+    assert fetched.options["power_prompt"] == "test brief"
+    assert fetched.options["strategy_override"] == "force_single_shot"
+
+
 def test_round_trip_new_options() -> None:
     repo = _make_repo()
     job = repo.create_job(

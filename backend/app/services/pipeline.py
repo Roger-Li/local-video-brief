@@ -176,7 +176,9 @@ class VideoSummaryPipeline:
             logger.info("stage=summarizing DONE job=%s (%.1fs)", job_id, time.perf_counter() - t0)
 
             # Study pack generation (optional, non-fatal).
-            if enable_study_pack:
+            # Skip when power mode produced prose output (study pack needs structured chapters).
+            is_power_result = "raw_summary_text" in summary_payload
+            if enable_study_pack and not is_power_result:
                 self.repository.update_job(job_id, progress_stage="generating_study_pack")
                 logger.info("stage=generating_study_pack job=%s", job_id)
                 t0 = time.perf_counter()

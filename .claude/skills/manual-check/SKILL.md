@@ -13,7 +13,7 @@ Kill stale processes, launch a fresh backend and frontend, then present a step-b
 - `$ARGUMENTS` contains optional flags:
   - `--port <N>` — backend port (default: 8010)
   - `--frontend-port <N>` — frontend dev server port (default: 5173)
-  - `--provider <fallback|mlx|omlx>` — summarizer provider (default: from `.env` or `fallback`)
+  - `--provider <fallback|mlx|omlx>` — summarizer provider (default: from `.env` — do NOT override unless the user explicitly asks)
 - Parse flags from `$ARGUMENTS`. Anything not recognised is ignored.
 
 ## Step 1 — Kill stale processes
@@ -32,28 +32,44 @@ Confirm both ports are free before proceeding.
 ## Step 2 — Detect environment
 
 1. Python: check `OVS_TEST_PYTHON`, then `$HOME/ml-env/bin/python`, then `.venv/bin/python`.
-2. If provider is `omlx`: read `OVS_OMLX_BASE_URL`, `OVS_OMLX_MODEL` from env or `.env`. Print effective config.
-3. Print the resolved settings: provider, python path, ports.
+2. Read `.env` to determine the configured provider. Do NOT override `OVS_SUMMARIZER_PROVIDER` unless `--provider` was explicitly passed. The `.env` is the source of truth.
+3. If provider is `omlx`: read `OVS_OMLX_BASE_URL`, `OVS_OMLX_MODEL` from `.env`. Print effective config.
+4. Print the resolved settings: provider, python path, ports.
 
 ## Step 3 — Launch backend
 
+**IMPORTANT:** Long-running servers MUST be launched with `& disown` inside a **foreground** `Bash` call (do NOT use `run_in_background: true`). The `run_in_background` parameter creates a tracked task whose process group is killed when the task "completes." Use `& disown` to detach the server from the shell so it survives.
+
+Launch and health-check in a single foreground Bash call:
+
 ```bash
+# Only set OVS_SUMMARIZER_PROVIDER if --provider was explicitly passed.
+# Otherwise let .env determine the provider (usually omlx).
 OVS_ENABLE_STUDY_PACK=true \
-OVS_SUMMARIZER_PROVIDER=$PROVIDER \
 OVS_ENABLE_MLX_ASR=true \
+${PROVIDER:+OVS_SUMMARIZER_PROVIDER=$PROVIDER} \
 $PYTHON -m uvicorn backend.app.main:app --host 127.0.0.1 --port $PORT \
-  > artifacts/test-runs/backend-manual-${PORT}.log 2>&1 &
+  > artifacts/test-runs/backend-manual-${PORT}.log 2>&1 & disown
+sleep 2
+for i in $(seq 1 30); do
+  curl -fsS http://127.0.0.1:$PORT/health >/dev/null 2>&1 && echo "Backend healthy" && break
+  sleep 1
+done
+curl -fsS http://127.0.0.1:$PORT/health >/dev/null 2>&1 || \
+  (echo "FAILED — log tail:" && tail -30 artifacts/test-runs/backend-manual-${PORT}.log)
 ```
 
-Poll `/health` until ready (up to 30s). If it doesn't start, show log tail and abort.
+If it doesn't start, show log tail and abort.
 
 ## Step 4 — Launch frontend
 
-```bash
-cd frontend && VITE_API_BASE_URL=http://127.0.0.1:$PORT npx vite --port $FRONTEND_PORT &
-```
+Same rule: `& disown` in a foreground Bash call, then verify in the same command.
 
-Wait a few seconds, then verify it responds with a curl check.
+```bash
+cd frontend && VITE_API_BASE_URL=http://127.0.0.1:$PORT npx vite --port $FRONTEND_PORT > /dev/null 2>&1 & disown
+sleep 3
+curl -fsS -o /dev/null http://localhost:$FRONTEND_PORT && echo "Frontend running" || echo "Frontend not responding"
+```
 
 ## Step 5 — Present the checklist
 

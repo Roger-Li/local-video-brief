@@ -25,6 +25,133 @@ def _resolve_preset(style_preset_id: str | None) -> StylePreset:
     return STYLE_PRESETS["default"]
 
 
+# ---------------------------------------------------------------------------
+# Power mode constants and helpers
+# ---------------------------------------------------------------------------
+
+_POWER_MODE_SYSTEM = (
+    "You are a video summarization assistant. "
+    "Output your response as clear, well-structured text using markdown formatting. "
+    "Use headings and bullet points where appropriate. "
+    "Do NOT output JSON. Do NOT wrap your response in code fences."
+)
+
+_POWER_SINGLE_SHOT_UTILISATION = 0.9
+
+
+def build_power_default_brief(
+    style_preset_id: str | None = None,
+    focus_hint: str | None = None,
+) -> str:
+    """Derive a human-readable summary brief from guided settings.
+
+    This is what pre-populates the Power mode textarea. It uses the
+    preset's actual system_suffix (not the UI description), so the
+    user sees the real instruction text that guided mode would apply.
+    """
+    preset = _resolve_preset(style_preset_id)
+
+    parts = [
+        "You are a multilingual video summarization model. "
+        "Summarize the provided transcript clearly and thoroughly. "
+        "Cover the main topics, key arguments, and important details. "
+        "Produce output in both English and Chinese."
+    ]
+
+    if preset.system_suffix:
+        parts.append(preset.system_suffix)
+
+    if focus_hint and focus_hint.strip():
+        parts.append(f"Content focus: {focus_hint.strip()}")
+
+    return "\n\n".join(parts)
+
+
+def _build_power_user_msg(
+    power_prompt: str,
+    source_metadata: dict,
+    chapters: list[dict],
+) -> str:
+    brief_metadata = {
+        k: source_metadata[k]
+        for k in ("title", "description", "duration", "upload_date", "channel", "tags")
+        if k in source_metadata
+    }
+    transcript_text = "\n\n".join(
+        f"[{ch['start_s']:.0f}s - {ch['end_s']:.0f}s] {ch.get('title_hint', '')}\n{ch['text']}"
+        for ch in chapters
+    )
+    return (
+        f"Summarization instructions:\n{power_prompt}\n"
+        f"---\n"
+        f"Video metadata: {json.dumps(brief_metadata, ensure_ascii=False)}\n\n"
+        f"Transcript:\n{transcript_text}"
+    )
+
+
+def _build_power_chapter_user_msg(
+    power_prompt: str,
+    chapter: dict,
+    chapter_index: int,
+    total_chapters: int,
+) -> str:
+    return (
+        f"Summarization instructions:\n{power_prompt}\n"
+        f"---\n"
+        f"Chapter {chapter_index + 1} of {total_chapters}: "
+        f"{chapter.get('title_hint', 'Untitled')}\n"
+        f"Time range: {chapter['start_s']:.0f}s - {chapter['end_s']:.0f}s\n\n"
+        f"{chapter['text']}"
+    )
+
+
+def _build_power_overall_user_msg(
+    power_prompt: str,
+    source_metadata: dict,
+    chapter_proses: list[str],
+) -> str:
+    chapters_block = "\n\n".join(
+        f"[Chapter {i+1}]\n{prose}" for i, prose in enumerate(chapter_proses)
+    )
+    brief_metadata = {
+        k: source_metadata[k]
+        for k in ("title", "description", "duration", "upload_date", "channel", "tags")
+        if k in source_metadata
+    }
+    return (
+        f"Summarization instructions:\n{power_prompt}\n\n"
+        f"Below are per-chapter summaries. Synthesize them into a single "
+        f"overall summary of the entire video.\n"
+        f"---\n"
+        f"Video metadata: {json.dumps(brief_metadata, ensure_ascii=False)}\n\n"
+        f"Chapter summaries:\n{chapters_block}"
+    )
+
+
+def _power_stub_result(raw_text: str) -> dict:
+    """Wrap power mode prose into the standard result envelope."""
+    return {
+        "raw_summary_text": raw_text,
+        "chapters": [],
+        "overall_summary": {
+            "summary_en": "",
+            "summary_zh": "",
+            "highlights": [],
+        },
+    }
+
+
+def _format_rule_based_chapter_as_prose(ch_summary: dict) -> str:
+    """Format a rule-based chapter summary dict as readable prose for power mode fallback."""
+    title = ch_summary.get("title", "Untitled")
+    summary = ch_summary.get("summary_en", "")
+    key_points = ch_summary.get("key_points", [])
+    parts = [f"## {title}", summary]
+    if key_points:
+        parts.append("\n".join(f"- {pt}" for pt in key_points))
+    return "\n\n".join(parts)
+
+
 def build_summarizer_prompt(
     settings: Settings,
     source_metadata: dict,
@@ -437,7 +564,8 @@ def _validate_single_shot_payload(parsed: dict, expected_chapters: int | None = 
     return parsed
 
 
-def _choose_strategy(chapters: list[dict], max_input_chars: int) -> str:
+def _choose_strategy(chapters: list[dict], max_input_chars: int,
+                     utilisation: float = _SINGLE_SHOT_UTILISATION) -> str:
     """Choose summarization strategy based on transcript size.
 
     Returns one of: 'single_shot', 'per_chapter', 'hierarchical'.
@@ -445,7 +573,7 @@ def _choose_strategy(chapters: list[dict], max_input_chars: int) -> str:
     total_chars = sum(len(ch.get("text", "")) for ch in chapters)
     # Apply utilisation factor to account for prompt overhead (system prompt,
     # schema example, metadata JSON, per-chapter JSON wrapping).
-    if total_chars <= int(max_input_chars * _SINGLE_SHOT_UTILISATION):
+    if total_chars <= int(max_input_chars * utilisation):
         return "single_shot"
     any_chapter_exceeds = any(
         len(ch.get("text", "")) > max_input_chars for ch in chapters
@@ -668,6 +796,125 @@ class MlxQwenSummaryGenerator:
         parsed = parse_model_json(raw, required_keys={"chapters", "overall_summary"})
         return _validate_single_shot_payload(parsed, expected_chapters=len(chapters))
 
+    def _summarize_power(
+        self,
+        source_metadata: dict,
+        transcript_segments: list[dict],
+        chapters: list[dict],
+        output_languages: list[str],
+        artifact_dir: Optional[Path],
+        progress_callback: Optional[Callable[[str], None]],
+        opts: dict,
+    ) -> dict:
+        preset = _resolve_preset(opts.get("style_preset"))
+        focus_hint = opts.get("focus_hint")
+        multiplier = preset.max_tokens_multiplier
+        power_prompt = opts.get("power_prompt") or build_power_default_brief(
+            opts.get("style_preset"), focus_hint,
+        )
+        strategy_override = opts.get("strategy_override", "auto")
+        max_input_chars = self.settings.summarizer_max_input_chars
+
+        if strategy_override == "force_single_shot":
+            strategy = "single_shot"
+            total_chars = sum(len(ch.get("text", "")) for ch in chapters)
+            if total_chars > max_input_chars:
+                logger.warning(
+                    "power force_single_shot: transcript %d chars exceeds max_input_chars %d",
+                    total_chars, max_input_chars,
+                )
+        else:
+            strategy = _choose_strategy(chapters, max_input_chars, _POWER_SINGLE_SHOT_UTILISATION)
+
+        logger.info("power mode strategy=%s chapters=%d", strategy, len(chapters))
+        if artifact_dir:
+            artifact_dir.mkdir(parents=True, exist_ok=True)
+            (artifact_dir / "summarizer_strategy.txt").write_text(f"power_{strategy}", encoding="utf-8")
+
+        max_tokens = compute_max_tokens(self.settings, len(chapters), multiplier)
+
+        if strategy == "single_shot":
+            if progress_callback:
+                progress_callback("summarizing_single_shot")
+            user_msg = _build_power_user_msg(power_prompt, source_metadata, chapters)
+            raw = self._call_llm(
+                _POWER_MODE_SYSTEM, user_msg, max_tokens=max_tokens,
+                artifact_dir=artifact_dir, artifact_label="power_single_shot",
+            )
+            return _power_stub_result(raw.strip())
+
+        # --- Per-chapter / hierarchical paths ---
+        fallback = RuleBasedSummaryGenerator(self.settings)
+        chapter_proses: list[str] = []
+
+        if progress_callback:
+            progress_callback("summarizing_chunks")
+
+        for ch_idx, chapter in enumerate(chapters):
+            ch_artifact = (artifact_dir / f"ch{ch_idx}") if artifact_dir else None
+            seg_chunks = chunk_segments(chapter.get("segments", []), max_input_chars)
+
+            if len(seg_chunks) > 1:
+                # Hierarchical: condense chunks first (reuses guided chunk-note prompts).
+                notes = []
+                for c_idx, seg_chunk in enumerate(seg_chunks):
+                    text = segments_to_text(seg_chunk)
+                    try:
+                        note = self._summarize_chunk(
+                            text, chapter.get("title_hint", ""),
+                            c_idx, len(seg_chunks), artifact_dir=ch_artifact,
+                            focus_hint=focus_hint, multiplier=multiplier,
+                        )
+                    except Exception as exc:
+                        logger.warning("power chunk note failed ch=%d chunk=%d: %s", ch_idx, c_idx, exc)
+                        note = text
+                    notes.append(note)
+                chapter_text = "\n\n".join(notes)
+            else:
+                chapter_text = chapter.get("text", "")
+
+            if progress_callback:
+                progress_callback("synthesizing_chapters")
+
+            try:
+                user_msg = _build_power_chapter_user_msg(
+                    power_prompt, {**chapter, "text": chapter_text},
+                    ch_idx, len(chapters),
+                )
+                raw = self._call_llm(
+                    _POWER_MODE_SYSTEM, user_msg, max_tokens=self._step_tokens(multiplier),
+                    artifact_dir=ch_artifact, artifact_label="power_chapter",
+                )
+                prose = raw.strip()
+            except Exception as exc:
+                logger.warning("power chapter synthesis failed ch=%d: %s, using rule-based fallback", ch_idx, exc)
+                ch_summary = fallback.summarize_chapter(chapter, ch_idx + 1)
+                prose = _format_rule_based_chapter_as_prose(ch_summary)
+
+            if ch_artifact:
+                ch_artifact.mkdir(parents=True, exist_ok=True)
+                (ch_artifact / "power_chapter_prose.txt").write_text(prose, encoding="utf-8")
+            chapter_proses.append(prose)
+
+        # Overall synthesis
+        if progress_callback:
+            progress_callback("synthesizing_overall")
+
+        try:
+            user_msg = _build_power_overall_user_msg(power_prompt, source_metadata, chapter_proses)
+            raw = self._call_llm(
+                _POWER_MODE_SYSTEM, user_msg, max_tokens=max_tokens,
+                artifact_dir=artifact_dir, artifact_label="power_overall",
+            )
+            final_prose = raw.strip()
+        except Exception as exc:
+            logger.warning("power overall synthesis failed: %s, concatenating chapter prose", exc)
+            final_prose = "\n\n".join(
+                f"## Chapter {i+1}\n\n{prose}" for i, prose in enumerate(chapter_proses)
+            )
+
+        return _power_stub_result(final_prose)
+
     def summarize(
         self,
         source_metadata: dict,
@@ -682,6 +929,16 @@ class MlxQwenSummaryGenerator:
         preset = _resolve_preset(opts.get("style_preset"))
         focus_hint = opts.get("focus_hint")
         multiplier = preset.max_tokens_multiplier
+
+        if opts.get("power_mode"):
+            # Power mode failures propagate to the pipeline (job marked failed).
+            # The user chose power mode deliberately — silently downgrading to
+            # structured output would discard their edited brief.
+            self._ensure_model_loaded()
+            return self._summarize_power(
+                source_metadata, transcript_segments, chapters,
+                output_languages, artifact_dir, progress_callback, opts,
+            )
 
         fallback = RuleBasedSummaryGenerator(self.settings)
         try:
@@ -977,6 +1234,129 @@ class OmlxSummaryGenerator:
         parsed = parse_model_json(raw, required_keys={"chapters", "overall_summary"})
         return _validate_single_shot_payload(parsed, expected_chapters=len(chapters))
 
+    def _summarize_power(
+        self,
+        source_metadata: dict,
+        transcript_segments: list[dict],
+        chapters: list[dict],
+        output_languages: list[str],
+        artifact_dir: Optional[Path],
+        progress_callback: Optional[Callable[[str], None]],
+        opts: dict,
+    ) -> dict:
+        preset = _resolve_preset(opts.get("style_preset"))
+        focus_hint = opts.get("focus_hint")
+        multiplier = preset.max_tokens_multiplier
+        model_override = opts.get("omlx_model_override") or None
+        power_prompt = opts.get("power_prompt") or build_power_default_brief(
+            opts.get("style_preset"), focus_hint,
+        )
+        strategy_override = opts.get("strategy_override", "auto")
+        max_input_chars = self.settings.summarizer_max_input_chars
+
+        if strategy_override == "force_single_shot":
+            strategy = "single_shot"
+            total_chars = sum(len(ch.get("text", "")) for ch in chapters)
+            if total_chars > max_input_chars:
+                logger.warning(
+                    "power force_single_shot: transcript %d chars exceeds max_input_chars %d",
+                    total_chars, max_input_chars,
+                )
+        else:
+            strategy = _choose_strategy(chapters, max_input_chars, _POWER_SINGLE_SHOT_UTILISATION)
+
+        logger.info("omlx power mode strategy=%s chapters=%d", strategy, len(chapters))
+        if artifact_dir:
+            artifact_dir.mkdir(parents=True, exist_ok=True)
+            (artifact_dir / "summarizer_strategy.txt").write_text(f"power_{strategy}", encoding="utf-8")
+
+        max_tokens = compute_max_tokens(self.settings, len(chapters), multiplier)
+
+        if strategy == "single_shot":
+            if progress_callback:
+                progress_callback("summarizing_single_shot")
+            user_msg = _build_power_user_msg(power_prompt, source_metadata, chapters)
+            raw = self._call_omlx(
+                _POWER_MODE_SYSTEM, user_msg, max_tokens=max_tokens,
+                artifact_dir=artifact_dir, artifact_label="power_single_shot",
+                model_override=model_override,
+            )
+            return _power_stub_result(raw.strip())
+
+        # --- Per-chapter / hierarchical paths ---
+        fallback = RuleBasedSummaryGenerator(self.settings)
+        chapter_proses: list[str] = []
+
+        if progress_callback:
+            progress_callback("summarizing_chunks")
+
+        for ch_idx, chapter in enumerate(chapters):
+            ch_artifact = (artifact_dir / f"ch{ch_idx}") if artifact_dir else None
+            seg_chunks = chunk_segments(chapter.get("segments", []), max_input_chars)
+
+            if len(seg_chunks) > 1:
+                notes = []
+                for c_idx, seg_chunk in enumerate(seg_chunks):
+                    text = segments_to_text(seg_chunk)
+                    try:
+                        note = self._summarize_chunk(
+                            text, chapter.get("title_hint", ""),
+                            c_idx, len(seg_chunks), artifact_dir=ch_artifact,
+                            focus_hint=focus_hint, multiplier=multiplier,
+                            model_override=model_override,
+                        )
+                    except Exception as exc:
+                        logger.warning("omlx power chunk note failed ch=%d chunk=%d: %s", ch_idx, c_idx, exc)
+                        note = text
+                    notes.append(note)
+                chapter_text = "\n\n".join(notes)
+            else:
+                chapter_text = chapter.get("text", "")
+
+            if progress_callback:
+                progress_callback("synthesizing_chapters")
+
+            try:
+                user_msg = _build_power_chapter_user_msg(
+                    power_prompt, {**chapter, "text": chapter_text},
+                    ch_idx, len(chapters),
+                )
+                raw = self._call_omlx(
+                    _POWER_MODE_SYSTEM, user_msg, max_tokens=self._step_tokens(multiplier),
+                    artifact_dir=ch_artifact, artifact_label="power_chapter",
+                    model_override=model_override,
+                )
+                prose = raw.strip()
+            except Exception as exc:
+                logger.warning("omlx power chapter synthesis failed ch=%d: %s, using rule-based fallback", ch_idx, exc)
+                ch_summary = fallback.summarize_chapter(chapter, ch_idx + 1)
+                prose = _format_rule_based_chapter_as_prose(ch_summary)
+
+            if ch_artifact:
+                ch_artifact.mkdir(parents=True, exist_ok=True)
+                (ch_artifact / "power_chapter_prose.txt").write_text(prose, encoding="utf-8")
+            chapter_proses.append(prose)
+
+        # Overall synthesis
+        if progress_callback:
+            progress_callback("synthesizing_overall")
+
+        try:
+            user_msg = _build_power_overall_user_msg(power_prompt, source_metadata, chapter_proses)
+            raw = self._call_omlx(
+                _POWER_MODE_SYSTEM, user_msg, max_tokens=max_tokens,
+                artifact_dir=artifact_dir, artifact_label="power_overall",
+                model_override=model_override,
+            )
+            final_prose = raw.strip()
+        except Exception as exc:
+            logger.warning("omlx power overall synthesis failed: %s, concatenating chapter prose", exc)
+            final_prose = "\n\n".join(
+                f"## Chapter {i+1}\n\n{prose}" for i, prose in enumerate(chapter_proses)
+            )
+
+        return _power_stub_result(final_prose)
+
     def summarize(
         self,
         source_metadata: dict,
@@ -992,6 +1372,15 @@ class OmlxSummaryGenerator:
         focus_hint = opts.get("focus_hint")
         multiplier = preset.max_tokens_multiplier
         model_override = opts.get("omlx_model_override") or None
+
+        if opts.get("power_mode"):
+            # Power mode failures propagate to the pipeline (job marked failed).
+            # The user chose power mode deliberately — silently downgrading to
+            # structured output would discard their edited brief.
+            return self._summarize_power(
+                source_metadata, transcript_segments, chapters,
+                output_languages, artifact_dir, progress_callback, opts,
+            )
 
         fallback = RuleBasedSummaryGenerator(self.settings)
         try:

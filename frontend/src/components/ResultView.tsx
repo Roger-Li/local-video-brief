@@ -2,6 +2,28 @@ import { useEffect, useState } from "react";
 import type { JobResultResponse } from "../types/api";
 import { StudyGuideView } from "./StudyGuideView";
 
+/** Minimal markdown-to-HTML: headings, bold, italic, bullet lists, line breaks. */
+function simpleMarkdown(md: string): string {
+  return md
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/^### (.+)$/gm, "<h4>$1</h4>")
+    .replace(/^## (.+)$/gm, "<h3>$1</h3>")
+    .replace(/^# (.+)$/gm, "<h2>$1</h2>")
+    // Convert * bullets to - so list handling is uniform, before bold/italic.
+    .replace(/^\* (.+)$/gm, "- $1")
+    .replace(/^- (.+)$/gm, "<li>$1</li>")
+    .replace(/(<li>.*<\/li>\n?)+/g, (m) => `<ul>${m}</ul>`)
+    // Bold/italic after list handling so * bullets aren't misread as emphasis.
+    .replace(/\*\*(.+?)\*\*/g, "<strong>$1</strong>")
+    .replace(/\*(.+?)\*/g, "<em>$1</em>")
+    .replace(/\n{2,}/g, "</p><p>")
+    .replace(/\n/g, "<br/>")
+    .replace(/^/, "<p>")
+    .replace(/$/, "</p>");
+}
+
 function formatTimestamp(seconds: number): string {
   const rounded = Math.floor(seconds);
   const hours = Math.floor(rounded / 3600);
@@ -17,7 +39,8 @@ interface ResultViewProps {
 }
 
 export function ResultView({ result }: ResultViewProps) {
-  const hasStudyPack = result.study_pack != null;
+  const isPowerResult = result.raw_summary_text != null;
+  const hasStudyPack = !isPowerResult && result.study_pack != null;
   const [activeTab, setActiveTab] = useState<Tab>("summary");
 
   useEffect(() => {
@@ -48,7 +71,24 @@ export function ResultView({ result }: ResultViewProps) {
           ))}
       </div>
 
-      {activeTab === "summary" && (
+      {activeTab === "summary" && isPowerResult && (
+        <article className="panel">
+          <span className="eyebrow">Summary (Power mode)</span>
+          <h2>{String(result.source_metadata.title ?? "Untitled video")}</h2>
+          {result.raw_summary_text ? (
+            <div
+              className="power-prose"
+              dangerouslySetInnerHTML={{
+                __html: simpleMarkdown(result.raw_summary_text),
+              }}
+            />
+          ) : (
+            <p className="muted">No summary content was generated.</p>
+          )}
+        </article>
+      )}
+
+      {activeTab === "summary" && !isPowerResult && (
         <>
           <article className="panel">
             <span className="eyebrow">Overall summary</span>

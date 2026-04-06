@@ -93,11 +93,30 @@ if ! curl -fsS "${BASE_URL}/health" >/dev/null 2>&1; then
   exit 1
 fi
 
+POWER_MODE="${OVS_TEST_POWER_MODE:-false}"
+STRATEGY_OVERRIDE="${OVS_TEST_STRATEGY_OVERRIDE:-}"
+
+# Build options JSON for job submission.
+OPTIONS_JSON=""
+if [[ "${POWER_MODE}" == "true" ]]; then
+  OPTIONS_JSON='"options":{"power_mode":true'
+  if [[ -n "${STRATEGY_OVERRIDE}" ]]; then
+    OPTIONS_JSON="${OPTIONS_JSON},\"strategy_override\":\"${STRATEGY_OVERRIDE}\""
+  fi
+  OPTIONS_JSON="${OPTIONS_JSON}}"
+fi
+
 echo "Submitting job for ${URL}"
+if [[ -n "${OPTIONS_JSON}" ]]; then
+  JOB_BODY="{\"url\":\"${URL}\",\"output_languages\":[\"en\",\"zh-CN\"],\"mode\":\"captions_first\",${OPTIONS_JSON}}"
+else
+  JOB_BODY="{\"url\":\"${URL}\",\"output_languages\":[\"en\",\"zh-CN\"],\"mode\":\"captions_first\"}"
+fi
+echo "request body: ${JOB_BODY}"
 JOB_ID="$(
   curl -fsS -X POST "${BASE_URL}/jobs" \
     -H 'Content-Type: application/json' \
-    -d "{\"url\":\"${URL}\",\"output_languages\":[\"en\",\"zh-CN\"],\"mode\":\"captions_first\"}" \
+    -d "${JOB_BODY}" \
   | "${PYTHON}" -c 'import json,sys; print(json.load(sys.stdin)["job_id"])'
 )"
 
@@ -146,14 +165,24 @@ printf '%s\n' "${RESULT_JSON}" > "${RESULT_PATH}"
 
 echo "Job completed successfully."
 echo "Saved result to ${RESULT_PATH}"
-RESULT_PATH="${RESULT_PATH}" "${PYTHON}" - <<'PY'
+RESULT_PATH="${RESULT_PATH}" POWER_MODE="${POWER_MODE}" "${PYTHON}" - <<'PY'
 import json
 import os
 
 with open(os.environ["RESULT_PATH"], "r", encoding="utf-8") as handle:
     result = json.load(handle)
-overall = result["overall_summary"]
-print(f"chapters={len(result['chapters'])}")
-print(f"summary_en={overall['summary_en']}")
-print(f"summary_zh={overall['summary_zh']}")
+
+power = os.environ.get("POWER_MODE", "false") == "true"
+if power:
+    raw = result.get("raw_summary_text")
+    if raw is None:
+        print("FAIL: power mode job missing raw_summary_text")
+        raise SystemExit(1)
+    print(f"raw_summary_text length={len(raw)}")
+    print(f"raw_summary_text preview={raw[:200]}")
+else:
+    overall = result["overall_summary"]
+    print(f"chapters={len(result['chapters'])}")
+    print(f"summary_en={overall['summary_en']}")
+    print(f"summary_zh={overall['summary_zh']}")
 PY

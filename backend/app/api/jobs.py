@@ -70,5 +70,6 @@ def get_job_result(job_id: str, request: Request) -> JobResultResponse:
         artifacts=job.artifacts,
         transcript_stats=transcript_stats,
         study_pack=job.result_payload.get("study_pack"),
+        raw_summary_text=job.result_payload.get("raw_summary_text"),
     )
 

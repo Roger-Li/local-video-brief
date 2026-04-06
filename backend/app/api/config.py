@@ -3,6 +3,7 @@ from __future__ import annotations
 from fastapi import APIRouter, Request
 
 from backend.app.core.style_presets import STYLE_PRESETS
+from backend.app.services.summarizer import build_power_default_brief
 
 router = APIRouter(tags=["config"])
 
@@ -40,8 +41,18 @@ def get_config(request: Request) -> dict:
         "current_model": current_model,
         "model_override_allowed": provider == "omlx",
         "supports_prompt_customization": supports_prompts,
+        "supports_power_mode": supports_prompts,
         "style_presets": [
             {"id": p.id, "label": p.label, "description": p.description}
             for p in STYLE_PRESETS.values()
         ],
     }
+
+
+@router.get("/config/power-prompt-default")
+def get_power_prompt_default(
+    style_preset: str | None = None,
+    focus_hint: str | None = None,
+) -> dict:
+    """Return the default editable summary brief for Power mode."""
+    return {"default_prompt": build_power_default_brief(style_preset, focus_hint)}

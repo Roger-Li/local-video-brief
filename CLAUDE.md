@@ -43,7 +43,7 @@ This repository builds a local-first video summary tool for Apple Silicon Macs. 
 
 ## Testing Expectations
 
-- Run backend tests with `python3 -m pytest backend/tests` (205 tests).
+- Run backend tests with `python3 -m pytest backend/tests` (240 tests).
 - For real end-to-end validation, run:
 
 ```bash
@@ -51,6 +51,7 @@ This repository builds a local-first video summary tool for Apple Silicon Macs. 
 ./scripts/test_video_job.sh "https://www.youtube.com/watch?v=Lk_OQufs1HQ"
 OVS_TEST_ENABLE_MLX_SUMMARIZER=true ./scripts/test_video_job.sh "https://youtu.be/j190mwiVlwA"
 OVS_TEST_SUMMARIZER_PROVIDER=omlx OVS_OMLX_BASE_URL=http://localhost:8080/v1 OVS_OMLX_MODEL=<model> ./scripts/test_video_job.sh
+OVS_TEST_POWER_MODE=true OVS_TEST_SUMMARIZER_PROVIDER=omlx OVS_OMLX_BASE_URL=http://localhost:8080/v1 OVS_OMLX_MODEL=<model> ./scripts/test_video_job.sh
 ```
 
 - Successful smoke-test outputs are written to `artifacts/test-runs/<job-id>-result.json`.
@@ -74,7 +75,7 @@ OVS_TEST_SUMMARIZER_PROVIDER=omlx OVS_OMLX_BASE_URL=http://localhost:8080/v1 OVS
 ## Per-Job Options
 
 - Optional per-job overrides via `options` field on `CreateJobRequest`. When omitted, all settings fall back to server defaults.
-- Five options: `enable_study_pack`, `enable_transcript_normalization`, `style_preset`, `focus_hint`, `omlx_model_override`. `null` = use server default.
+- Eight options: `enable_study_pack`, `enable_transcript_normalization`, `style_preset`, `focus_hint`, `omlx_model_override`, `power_mode`, `power_prompt`, `strategy_override`. `null` = use server default.
 - `summarizer_provider` is **not** per-job — the MLX provider loads a multi-GB model into GPU memory at startup.
 - Frontend: collapsible "Options" section in `JobForm.tsx` below the URL field. Prompt controls (presets, focus hint, model override) are capability-gated via `GET /config`.
 
@@ -87,6 +88,18 @@ OVS_TEST_SUMMARIZER_PROVIDER=omlx OVS_OMLX_BASE_URL=http://localhost:8080/v1 OVS
 - `omlx_model_override` changes the `model` field in oMLX HTTP requests. Ignored by MLX and fallback providers.
 - `GET /config` returns capability flags (`supports_prompt_customization`, `model_override_allowed`) so the frontend hides inert controls. For MLX, checks runtime availability of `mlx_lm` before advertising support.
 - The API always accepts and stores prompt options regardless of provider. Only LLM providers act on them.
+
+## Power Mode (v3)
+
+- Opt-in expert path: users see and edit the summarization brief, optionally force single-shot, and get prose/markdown output instead of structured JSON.
+- `power_mode: true` on `JobOptions` enables it. `power_prompt` is the user-edited brief (max 2000 chars). `strategy_override` is `"auto"` or `"force_single_shot"`.
+- Power mode produces `raw_summary_text` (prose) in the result. `chapters` and `overall_summary` are empty stubs for schema compat.
+- `GET /config` returns `supports_power_mode` (same gate as `supports_prompt_customization`). Hidden for fallback provider.
+- `GET /config/power-prompt-default` returns a default brief derived from preset + focus hint via `build_power_default_brief()`.
+- The system message (`_POWER_MODE_SYSTEM`) is a fixed constant requesting markdown output. The user's brief goes in the user message.
+- Auto strategy routes to per-chapter/hierarchical paths using power-specific prompts. `force_single_shot` bypasses strategy routing.
+- Study pack generation is skipped for power mode jobs. Fallback provider silently ignores `power_mode`.
+- Smoke test: `OVS_TEST_POWER_MODE=true OVS_TEST_STRATEGY_OVERRIDE=force_single_shot ./scripts/test_video_job.sh`.
 
 ## Known Limitations
 

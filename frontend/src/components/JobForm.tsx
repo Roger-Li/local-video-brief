@@ -1,5 +1,6 @@
-import { useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import type { JobOptions, ServerConfig } from "../types/api";
+import { getPowerPromptDefault } from "../lib/api";
 
 interface JobFormProps {
   onSubmit: (payload: { url: string; output_languages: string[]; mode: "captions_first"; options?: JobOptions }) => void;
@@ -15,9 +16,52 @@ export function JobForm({ onSubmit, isPending, serverConfig }: JobFormProps) {
   const [stylePreset, setStylePreset] = useState<string | null>(null);
   const [focusHint, setFocusHint] = useState("");
   const [modelOverride, setModelOverride] = useState("");
+  const [powerMode, setPowerMode] = useState(false);
+  const [powerPrompt, setPowerPrompt] = useState("");
+  const [powerPromptDirty, setPowerPromptDirty] = useState(false);
+  const [strategyOverride, setStrategyOverride] = useState<"auto" | "force_single_shot">("auto");
 
   const supportsPrompts = serverConfig?.supports_prompt_customization ?? false;
   const allowModelOverride = serverConfig?.model_override_allowed ?? false;
+  const supportsPowerMode = serverConfig?.supports_power_mode ?? false;
+
+  // Counter guards against stale fetch responses overwriting user edits.
+  const fetchIdRef = useRef(0);
+  // Track previous guided state to distinguish real changes from initial mount.
+  const prevGuidedRef = useRef({ stylePreset, focusHint });
+
+  const fetchDefaultBrief = useCallback(async () => {
+    const id = ++fetchIdRef.current;
+    try {
+      const brief = await getPowerPromptDefault(stylePreset, focusHint || undefined);
+      // Only apply if this is still the latest fetch request.
+      if (fetchIdRef.current === id) {
+        setPowerPrompt(brief);
+        setPowerPromptDirty(false);
+      }
+    } catch {
+      // Silently ignore — user can still type manually.
+    }
+  }, [stylePreset, focusHint]);
+
+  // Re-fetch default brief when guided controls change while in power mode.
+  // Handles both the clean case (silently re-fetch) and the dirty case
+  // (prompt to confirm reset). Runs after React has committed state updates
+  // so it always sees the current stylePreset/focusHint values.
+  useEffect(() => {
+    if (!powerMode) return;
+    const prev = prevGuidedRef.current;
+    const changed = prev.stylePreset !== stylePreset || prev.focusHint !== focusHint;
+    prevGuidedRef.current = { stylePreset, focusHint };
+    if (!changed) return; // Initial mount or unrelated re-render — skip.
+    if (powerPromptDirty) {
+      if (window.confirm("Reset brief to match guided settings?")) {
+        fetchDefaultBrief();
+      }
+      return;
+    }
+    fetchDefaultBrief();
+  }, [stylePreset, focusHint, powerMode, powerPromptDirty, fetchDefaultBrief]);
 
   const buildOptions = (): JobOptions | undefined => {
     if (!showOptions) return undefined;
@@ -28,6 +72,11 @@ export function JobForm({ onSubmit, isPending, serverConfig }: JobFormProps) {
       if (stylePreset !== null) opts.style_preset = stylePreset;
       if (focusHint.trim()) opts.focus_hint = focusHint.trim();
       if (modelOverride.trim()) opts.omlx_model_override = modelOverride.trim();
+    }
+    if (powerMode && supportsPowerMode) {
+      opts.power_mode = true;
+      if (powerPrompt.trim()) opts.power_prompt = powerPrompt.trim();
+      if (strategyOverride !== "auto") opts.strategy_override = strategyOverride;
     }
     return Object.keys(opts).length > 0 ? opts : undefined;
   };
@@ -140,6 +189,88 @@ export function JobForm({ onSubmit, isPending, serverConfig }: JobFormProps) {
                     onChange={(e) => setModelOverride(e.target.value)}
                   />
                 </label>
+              )}
+
+              {supportsPowerMode && (
+                <>
+                  <div className="options-section-label">Mode</div>
+                  <div className="mode-toggle-row">
+                    <button
+                      type="button"
+                      className={`mode-pill ${!powerMode ? "mode-pill-active" : ""}`}
+                      onClick={() => setPowerMode(false)}
+                    >
+                      Guided
+                    </button>
+                    <button
+                      type="button"
+                      className={`mode-pill ${powerMode ? "mode-pill-active" : ""}`}
+                      onClick={() => {
+                        setPowerMode(true);
+                        if (!powerPrompt) fetchDefaultBrief();
+                      }}
+                    >
+                      Power
+                    </button>
+                  </div>
+
+                  {powerMode && (
+                    <div className="power-panel">
+                      <div className="strategy-row">
+                        <span className="strategy-label">Strategy:</span>
+                        <label className="strategy-radio">
+                          <input
+                            type="radio"
+                            name="strategy"
+                            checked={strategyOverride === "auto"}
+                            onChange={() => setStrategyOverride("auto")}
+                          />
+                          Auto
+                        </label>
+                        <label className="strategy-radio">
+                          <input
+                            type="radio"
+                            name="strategy"
+                            checked={strategyOverride === "force_single_shot"}
+                            onChange={() => setStrategyOverride("force_single_shot")}
+                          />
+                          Single-shot
+                        </label>
+                      </div>
+
+                      <div className="power-prompt-field">
+                        <label className="field">
+                          <span>Summarization prompt</span>
+                          <textarea
+                            className="power-prompt-textarea"
+                            value={powerPrompt}
+                            onChange={(e) => {
+                              if (e.target.value.length <= 2000) {
+                                setPowerPrompt(e.target.value);
+                                setPowerPromptDirty(true);
+                              }
+                            }}
+                          />
+                        </label>
+                        <div className="power-prompt-footer">
+                          <span className="char-count">{powerPrompt.length} / 2000</span>
+                          <button
+                            type="button"
+                            className="reset-brief-button"
+                            onClick={fetchDefaultBrief}
+                          >
+                            Reset
+                          </button>
+                        </div>
+                      </div>
+
+                      <p className="power-info">
+                        Output will be free-form text. The model's response is displayed as-is (no
+                        structured chapter cards).
+                      </p>
+                    </div>
+                  )}
+                </>
               )}
             </>
           )}

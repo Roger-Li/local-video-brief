@@ -9,12 +9,13 @@
 - **Frontend tabbed result view** — Summary | Study Guide | Transcript tabs with Markdown/HTML export.
 - **Per-job options** — `enable_study_pack` and `enable_transcript_normalization` toggleable per job from the frontend UI. Server defaults as fallback.
 - **Configurable prompts and model selection** — Style presets (default, detailed, concise, technical, academic), content-focus hints, and oMLX model override from the frontend. `GET /config` endpoint with capability flags gates UI controls per provider. Token budgets clamped to avoid exceeding provider limits.
+- **Power mode (v3)** — Opt-in expert path: editable summary brief, force single-shot toggle, and free-form prose/markdown output. `GET /config/power-prompt-default` derives the brief from guided settings. Multi-step paths (per-chapter, hierarchical) produce prose through power-specific prompts. Study pack skipped for power mode. Spec: `docs/specs/configurable-prompts-v3-power-mode.md`.
 
 ## Future
 
 ### 1. Flexible Chunking and Splitting Controls
 
-Expose chunking strategy and context window assumptions to the user. Some local models support long enough context for single-shot summarization + Q&A without chapter splitting. Add overrides for `max_input_chars` and a "force single-shot" toggle.
+Expose chunking strategy and context window assumptions to the user. Some local models support long enough context for single-shot summarization + Q&A without chapter splitting. Add overrides for `max_input_chars` and a "force single-shot" toggle. (Note: Power mode's `force_single_shot` strategy already addresses part of this.)
 
 ### 2. Parallel Multi-Video Summarization
 

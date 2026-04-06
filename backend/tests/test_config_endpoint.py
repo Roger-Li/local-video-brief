@@ -45,3 +45,45 @@ def test_config_mlx_without_runtime_disables_prompts() -> None:
                 data = client.get("/config").json()
                 assert data["supports_prompt_customization"] is False
                 assert data["current_model"] is None
+
+
+def test_config_returns_supports_power_mode() -> None:
+    with TestClient(app) as client:
+        data = client.get("/config").json()
+        assert "supports_power_mode" in data
+        # For fallback provider, should be False
+        if data["summarizer_provider"] == "fallback":
+            assert data["supports_power_mode"] is False
+
+
+def test_power_prompt_default_endpoint() -> None:
+    with TestClient(app) as client:
+        resp = client.get("/config/power-prompt-default")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert "default_prompt" in data
+        assert "multilingual video summarization" in data["default_prompt"]
+
+
+def test_power_prompt_default_with_preset() -> None:
+    with TestClient(app) as client:
+        resp = client.get("/config/power-prompt-default?style_preset=detailed")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert "thorough" in data["default_prompt"].lower()
+
+
+def test_power_prompt_default_with_focus_hint() -> None:
+    with TestClient(app) as client:
+        resp = client.get("/config/power-prompt-default?focus_hint=math%20proofs")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert "Content focus: math proofs" in data["default_prompt"]
+
+
+def test_power_prompt_default_with_preset_and_focus() -> None:
+    with TestClient(app) as client:
+        resp = client.get("/config/power-prompt-default?style_preset=concise&focus_hint=algorithms")
+        data = resp.json()
+        assert "brief" in data["default_prompt"].lower()
+        assert "Content focus: algorithms" in data["default_prompt"]

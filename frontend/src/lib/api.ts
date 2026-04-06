@@ -43,3 +43,20 @@ export function getConfig(): Promise<ServerConfig> {
   return request<ServerConfig>("/config");
 }
 
+interface PowerPromptDefaultResponse {
+  default_prompt: string;
+}
+
+export async function getPowerPromptDefault(
+  stylePreset?: string | null,
+  focusHint?: string,
+): Promise<string> {
+  const params = new URLSearchParams();
+  if (stylePreset) params.set("style_preset", stylePreset);
+  if (focusHint?.trim()) params.set("focus_hint", focusHint.trim());
+  const data = await request<PowerPromptDefaultResponse>(
+    `/config/power-prompt-default?${params}`,
+  );
+  return data.default_prompt;
+}
+

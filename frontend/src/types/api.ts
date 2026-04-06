@@ -6,6 +6,9 @@ export interface JobOptions {
   focus_hint?: string;
   style_preset?: string;
   omlx_model_override?: string;
+  power_mode?: boolean;
+  power_prompt?: string;
+  strategy_override?: "auto" | "force_single_shot";
 }
 
 export interface StylePresetInfo {
@@ -19,6 +22,7 @@ export interface ServerConfig {
   current_model: string | null;
   model_override_allowed: boolean;
   supports_prompt_customization: boolean;
+  supports_power_mode: boolean;
   style_presets: StylePresetInfo[];
 }
 
@@ -98,5 +102,6 @@ export interface JobResultResponse {
   overall_summary: OverallSummary;
   artifacts: Record<string, unknown>;
   study_pack?: StudyPack | null;
+  raw_summary_text?: string | null;
 }
 

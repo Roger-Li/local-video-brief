@@ -12,6 +12,9 @@ class JobOptions(BaseModel):
     focus_hint: Optional[str] = None
     style_preset: Optional[str] = None
     omlx_model_override: Optional[str] = None
+    power_mode: Optional[bool] = None
+    power_prompt: Optional[str] = None
+    strategy_override: Optional[str] = None
 
     @field_validator("style_preset")
     @classmethod
@@ -28,6 +31,23 @@ class JobOptions(BaseModel):
             if len(v) > 500:
                 raise ValueError("focus_hint must be 500 characters or fewer")
             return v if v else None
+        return v
+
+    @field_validator("power_prompt")
+    @classmethod
+    def validate_power_prompt(cls, v: str | None) -> str | None:
+        if v is not None:
+            v = v.strip()
+            if len(v) > 2000:
+                raise ValueError("power_prompt must be 2000 characters or fewer")
+            return v if v else None
+        return v
+
+    @field_validator("strategy_override")
+    @classmethod
+    def validate_strategy_override(cls, v: str | None) -> str | None:
+        if v is not None and v not in ("auto", "force_single_shot"):
+            raise ValueError(f"strategy_override must be 'auto' or 'force_single_shot', got {v!r}")
         return v
 
 
@@ -118,3 +138,4 @@ class JobResultResponse(BaseModel):
     artifacts: Dict[str, Any]
     transcript_stats: Optional[TranscriptStats] = None
     study_pack: Optional[StudyPack] = None
+    raw_summary_text: Optional[str] = None

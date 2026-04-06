@@ -14,14 +14,19 @@ from backend.app.services.summarizer import (
     MlxQwenSummaryGenerator,
     OmlxSummaryGenerator,
     RuleBasedSummaryGenerator,
+    _POWER_MODE_SYSTEM,
     _build_chapter_synthesis_system,
     _build_chunk_note_user,
     _build_chapter_synthesis_user,
     _build_overall_synthesis_system,
     _build_overall_synthesis_user,
+    _build_power_chapter_user_msg,
+    _build_power_overall_user_msg,
+    _build_power_user_msg,
     _choose_strategy,
     _resolve_preset,
     _validate_single_shot_payload,
+    build_power_default_brief,
     build_summarizer_prompt,
     compute_max_tokens,
     create_summary_generator,
@@ -1004,3 +1009,217 @@ class TestRoutingUtilisation:
         # 5000 chars < 18000 * 0.7 = 12600
         chapters = [{"text": "A" * 5000, "segments": []}]
         assert _choose_strategy(chapters, 18000) == "single_shot"
+
+
+# ---------------------------------------------------------------------------
+# Power mode helpers
+# ---------------------------------------------------------------------------
+
+class TestBuildPowerDefaultBrief:
+    def test_default_preset(self):
+        brief = build_power_default_brief()
+        assert "multilingual video summarization" in brief
+        assert "English and Chinese" in brief
+
+    def test_detailed_preset_includes_suffix(self):
+        brief = build_power_default_brief("detailed")
+        assert "thorough summaries" in brief.lower()
+
+    def test_concise_preset_includes_suffix(self):
+        brief = build_power_default_brief("concise")
+        assert "brief" in brief.lower()
+
+    def test_focus_hint_appended(self):
+        brief = build_power_default_brief(focus_hint="mathematical proofs")
+        assert "Content focus: mathematical proofs" in brief
+
+    def test_focus_hint_stripped(self):
+        brief = build_power_default_brief(focus_hint="  math  ")
+        assert "Content focus: math" in brief
+
+    def test_empty_focus_hint_ignored(self):
+        brief = build_power_default_brief(focus_hint="   ")
+        assert "Content focus" not in brief
+
+    def test_preset_and_focus_combined(self):
+        brief = build_power_default_brief("detailed", "focus on proofs")
+        assert "thorough" in brief.lower()
+        assert "Content focus: focus on proofs" in brief
+
+    def test_uses_system_suffix_not_description(self):
+        """The brief should contain the preset's system_suffix, not the UI description."""
+        brief = build_power_default_brief("detailed")
+        preset = STYLE_PRESETS["detailed"]
+        assert preset.system_suffix in brief
+        # The description is a short label, not part of the brief.
+        assert brief != preset.description
+
+
+class TestPowerModeSystem:
+    def test_system_is_constant(self):
+        assert "Do NOT output JSON" in _POWER_MODE_SYSTEM
+        assert "markdown" in _POWER_MODE_SYSTEM
+
+    def test_system_has_no_user_editable_text(self):
+        """System message must not contain placeholders or dynamic content."""
+        assert "{" not in _POWER_MODE_SYSTEM
+        assert "Content focus" not in _POWER_MODE_SYSTEM
+
+
+class TestBuildPowerUserMsg:
+    def test_brief_in_user_message(self):
+        msg = _build_power_user_msg("Test brief", SAMPLE_METADATA, SAMPLE_CHAPTERS)
+        assert "Summarization instructions:\nTest brief" in msg
+        assert "Test Video" in msg
+        assert "Transcript:" in msg
+
+    def test_metadata_included(self):
+        msg = _build_power_user_msg("Brief", {"title": "My Video", "channel": "Ch"}, SAMPLE_CHAPTERS)
+        assert "My Video" in msg
+        assert "Ch" in msg
+
+
+class TestBuildPowerChapterUserMsg:
+    def test_chapter_context(self):
+        msg = _build_power_chapter_user_msg("Brief", SAMPLE_CHAPTERS[0], 0, 3)
+        assert "Chapter 1 of 3" in msg
+        assert "Brief" in msg
+
+    def test_title_hint(self):
+        msg = _build_power_chapter_user_msg("Brief", SAMPLE_CHAPTERS[0], 0, 1)
+        assert "Chapter 1" in msg
+
+
+class TestBuildPowerOverallUserMsg:
+    def test_synthesis_instruction(self):
+        msg = _build_power_overall_user_msg("Brief", SAMPLE_METADATA, ["Chapter 1 prose", "Chapter 2 prose"])
+        assert "Synthesize them into a single" in msg
+        assert "[Chapter 1]" in msg
+        assert "[Chapter 2]" in msg
+        assert "Chapter 1 prose" in msg
+
+
+class TestPowerModeOmlxDispatch:
+    """Test that OmlxSummaryGenerator.summarize() branches to power mode."""
+
+    def test_power_mode_single_shot(self):
+        settings = _omlx_settings()
+        gen = OmlxSummaryGenerator(settings)
+        prose = "# Summary\n\nThis is a power mode summary."
+        response = _make_openai_response(prose)
+
+        with patch("httpx.post", return_value=response):
+            result = gen.summarize(
+                source_metadata=SAMPLE_METADATA,
+                transcript_segments=SAMPLE_SEGMENTS,
+                chapters=SAMPLE_CHAPTERS,
+                output_languages=["en", "zh-CN"],
+                job_options={"power_mode": True, "strategy_override": "force_single_shot"},
+            )
+
+        assert result["raw_summary_text"] == prose
+        assert result["chapters"] == []
+        assert result["overall_summary"]["summary_en"] == ""
+
+    def test_power_mode_auto_delegates(self):
+        """Auto strategy with small content should use single-shot path."""
+        settings = _omlx_settings()
+        gen = OmlxSummaryGenerator(settings)
+        prose = "Auto summary."
+        response = _make_openai_response(prose)
+
+        with patch("httpx.post", return_value=response):
+            result = gen.summarize(
+                source_metadata=SAMPLE_METADATA,
+                transcript_segments=SAMPLE_SEGMENTS,
+                chapters=SAMPLE_CHAPTERS,
+                output_languages=["en", "zh-CN"],
+                job_options={"power_mode": True},
+            )
+
+        assert result["raw_summary_text"] == prose
+
+    def test_power_mode_fallback_provider_ignores(self):
+        """RuleBasedSummaryGenerator should ignore power_mode."""
+        settings = Settings()
+        gen = RuleBasedSummaryGenerator(settings)
+        result = gen.summarize(
+            source_metadata=SAMPLE_METADATA,
+            transcript_segments=SAMPLE_SEGMENTS,
+            chapters=SAMPLE_CHAPTERS,
+            output_languages=["en", "zh-CN"],
+            job_options={"power_mode": True},
+        )
+        # Should return structured output, not power mode.
+        assert "raw_summary_text" not in result
+        assert "chapters" in result
+        assert len(result["chapters"]) > 0
+
+    def test_power_mode_empty_prompt_uses_default(self):
+        """When power_prompt is None, build_power_default_brief() is used."""
+        settings = _omlx_settings()
+        gen = OmlxSummaryGenerator(settings)
+        prose = "Default brief output."
+        response = _make_openai_response(prose)
+
+        captured_bodies = []
+        original_post = httpx.post
+
+        def capture_post(*args, **kwargs):
+            captured_bodies.append(kwargs.get("json", {}))
+            return response
+
+        with patch("httpx.post", side_effect=capture_post):
+            gen.summarize(
+                source_metadata=SAMPLE_METADATA,
+                transcript_segments=SAMPLE_SEGMENTS,
+                chapters=SAMPLE_CHAPTERS,
+                output_languages=["en", "zh-CN"],
+                job_options={"power_mode": True, "strategy_override": "force_single_shot"},
+            )
+
+        # The user message should contain the default brief text.
+        user_msg = captured_bodies[0]["messages"][1]["content"]
+        assert "multilingual video summarization" in user_msg
+
+    def test_power_mode_honors_model_override(self):
+        settings = _omlx_settings()
+        gen = OmlxSummaryGenerator(settings)
+        response = _make_openai_response("output")
+
+        captured_bodies = []
+
+        def capture_post(*args, **kwargs):
+            captured_bodies.append(kwargs.get("json", {}))
+            return response
+
+        with patch("httpx.post", side_effect=capture_post):
+            gen.summarize(
+                source_metadata=SAMPLE_METADATA,
+                transcript_segments=SAMPLE_SEGMENTS,
+                chapters=SAMPLE_CHAPTERS,
+                output_languages=["en", "zh-CN"],
+                job_options={
+                    "power_mode": True,
+                    "strategy_override": "force_single_shot",
+                    "omlx_model_override": "custom-model",
+                },
+            )
+
+        assert captured_bodies[0]["model"] == "custom-model"
+
+    def test_power_mode_failure_propagates(self):
+        """Power mode failures must not silently downgrade to structured output."""
+        settings = _omlx_settings()
+        gen = OmlxSummaryGenerator(settings)
+        error_response = _make_openai_response("", status_code=500)
+
+        with patch("httpx.post", return_value=error_response):
+            with pytest.raises(Exception):
+                gen.summarize(
+                    source_metadata=SAMPLE_METADATA,
+                    transcript_segments=SAMPLE_SEGMENTS,
+                    chapters=SAMPLE_CHAPTERS,
+                    output_languages=["en", "zh-CN"],
+                    job_options={"power_mode": True, "strategy_override": "force_single_shot"},
+                )
