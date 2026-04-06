@@ -34,6 +34,12 @@ export function JobStatusCard({ job }: JobStatusCardProps) {
         </div>
       </dl>
 
+      {(job.status === "queued" || job.status === "running") && (
+        <div className="progress-bar-track">
+          <div className="progress-bar-fill" />
+        </div>
+      )}
+
       {job.error ? <p className="error-banner">{job.error}</p> : null}
     </section>
   );

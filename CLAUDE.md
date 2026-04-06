@@ -14,6 +14,24 @@ This repository builds a local-first video summary tool for Apple Silicon Macs. 
 - Artifacts: local files under `artifacts/`
 - Smoke test entrypoint: `scripts/test_video_job.sh`
 
+## Dev Commands
+
+- Start full stack (backend + frontend): `./scripts/dev_server.sh`
+- Backend only: `uvicorn backend.app.main:app --host 127.0.0.1 --port 8010`
+- Frontend only: `cd frontend && npm run dev`
+- Backend tests: `python3 -m pytest backend/tests` (240 tests)
+- Frontend tests: `cd frontend && npx vitest run` (`npm run test` may fail if vitest is not on PATH)
+- Build frontend: `cd frontend && npx vite build` (`npm run build` runs `tsc` first, which has pre-existing type errors in node_modules from dependency version mismatches — use `npx vite build` to verify the production bundle directly)
+
+## Key Entry Points
+
+- `backend/app/main.py` — FastAPI app factory, startup hooks, summary generator init
+- `backend/app/core/config.py` — `Settings` model, all env var definitions
+- `backend/app/services/pipeline.py` — Job processing pipeline orchestration
+- `backend/app/services/summarizer.py` — Summary provider implementations and factory
+- `frontend/src/App.tsx` — Root React component
+- `frontend/src/components/JobForm.tsx` — Job submission form with options UI
+
 ## Working Assumptions
 
 - The backend auto-loads `.env` from the repo root.
@@ -43,7 +61,6 @@ This repository builds a local-first video summary tool for Apple Silicon Macs. 
 
 ## Testing Expectations
 
-- Run backend tests with `python3 -m pytest backend/tests` (240 tests).
 - For real end-to-end validation, run:
 
 ```bash
@@ -116,3 +133,5 @@ OVS_TEST_POWER_MODE=true OVS_TEST_SUMMARIZER_PROVIDER=omlx OVS_OMLX_BASE_URL=htt
 - Preserve the current service boundaries in `backend/app/services`.
 - Do not replace the smoke-test script with a manual-only workflow.
 - Avoid coupling provider-specific logic into API handlers; keep it inside service adapters.
+- Frontend styles live in a single `frontend/src/styles.css` file (vanilla CSS, no Tailwind/preprocessor). Theme colors use CSS custom variables in `:root` but many component rules also contain hardcoded `rgba(...)` accent references — a full theme swap requires rewriting the entire file.
+- Google Fonts loaded in `frontend/index.html`: IBM Plex Sans (body) and DM Serif Display (hero heading).

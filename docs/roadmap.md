@@ -10,6 +10,7 @@
 - **Per-job options** — `enable_study_pack` and `enable_transcript_normalization` toggleable per job from the frontend UI. Server defaults as fallback.
 - **Configurable prompts and model selection** — Style presets (default, detailed, concise, technical, academic), content-focus hints, and oMLX model override from the frontend. `GET /config` endpoint with capability flags gates UI controls per provider. Token budgets clamped to avoid exceeding provider limits.
 - **Power mode (v3)** — Opt-in expert path: editable summary brief, force single-shot toggle, and free-form prose/markdown output. `GET /config/power-prompt-default` derives the brief from guided settings. Multi-step paths (per-chapter, hierarchical) produce prose through power-specific prompts. Study pack skipped for power mode. Spec: `docs/specs/configurable-prompts-v3-power-mode.md`.
+- **Frontend UI beautification** — Midnight Ocean dark theme (deep navy + teal/blue accents), DM Serif Display hero heading, CSS entry animations, micro-interactions (button shimmer, hover lifts, focus glow rings), animated progress bar on status card, staggered chapter card reveals, CSS chapter counters, transcript row tinting. Google Fonts loaded for IBM Plex Sans + DM Serif Display.
 
 ## Future
 
