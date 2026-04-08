@@ -141,6 +141,56 @@ def test_omlx_timeout_default(monkeypatch) -> None:
     assert settings.omlx_timeout_seconds == 180
 
 
+def test_cookies_from_browser_setting(monkeypatch) -> None:
+    monkeypatch.setenv("OVS_COOKIES_FROM_BROWSER", "brave")
+    monkeypatch.delenv("OVS_COOKIES_FILE", raising=False)
+    monkeypatch.delenv("OVS_SUMMARIZER_PROVIDER", raising=False)
+    settings = Settings()
+    assert settings.cookies_from_browser == "brave"
+    assert settings.cookies_file == ""
+
+
+def test_cookies_file_setting(monkeypatch) -> None:
+    monkeypatch.delenv("OVS_COOKIES_FROM_BROWSER", raising=False)
+    monkeypatch.setenv("OVS_COOKIES_FILE", "/tmp/cookies.txt")
+    monkeypatch.delenv("OVS_SUMMARIZER_PROVIDER", raising=False)
+    settings = Settings()
+    assert settings.cookies_from_browser == ""
+    assert settings.cookies_file == "/tmp/cookies.txt"
+
+
+def test_cookies_defaults_empty(monkeypatch) -> None:
+    monkeypatch.delenv("OVS_COOKIES_FROM_BROWSER", raising=False)
+    monkeypatch.delenv("OVS_COOKIES_FILE", raising=False)
+    monkeypatch.delenv("OVS_SUMMARIZER_PROVIDER", raising=False)
+    settings = Settings()
+    assert settings.cookies_from_browser == ""
+    assert settings.cookies_file == ""
+
+
+def test_client_cookie_args_from_browser(tmp_path: Path) -> None:
+    client = YtDlpVideoSourceClient(StorageService(tmp_path), [], cookies_from_browser="brave")
+    assert client._cookie_args == ["--cookies-from-browser", "brave"]
+
+
+def test_client_cookie_args_from_file(tmp_path: Path) -> None:
+    client = YtDlpVideoSourceClient(StorageService(tmp_path), [], cookies_file="/tmp/cookies.txt")
+    assert client._cookie_args == ["--cookies", "/tmp/cookies.txt"]
+
+
+def test_client_cookie_args_browser_takes_priority(tmp_path: Path) -> None:
+    client = YtDlpVideoSourceClient(
+        StorageService(tmp_path), [],
+        cookies_from_browser="brave", cookies_file="/tmp/cookies.txt",
+    )
+    assert client._cookie_args == ["--cookies-from-browser", "brave"]
+
+
+def test_client_cookie_args_default_empty(tmp_path: Path) -> None:
+    client = YtDlpVideoSourceClient(StorageService(tmp_path), [])
+    assert client._cookie_args == []
+
+
 def test_find_subtitles_for_family_returns_existing_english_first(tmp_path: Path) -> None:
     client = YtDlpVideoSourceClient(StorageService(tmp_path), [])
     job_dir = tmp_path / "job-1"

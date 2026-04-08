@@ -43,6 +43,7 @@ This repository builds a local-first video summary tool for Apple Silicon Macs. 
 - When `provider=omlx`, `OVS_OMLX_BASE_URL` and `OVS_OMLX_MODEL` are required. Optional: `OVS_OMLX_API_KEY`, `OVS_OMLX_TIMEOUT_SECONDS` (default 180).
 - `OVS_ENABLE_TRANSCRIPT_NORMALIZATION=true` (default) runs dedup/cleanup; set to `false` to bypass.
 - The smoke-test script accepts `OVS_TEST_PYTHON` to override the Python interpreter (e.g., `OVS_TEST_PYTHON=$HOME/ml-env/bin/python`).
+- `OVS_COOKIES_FILE` points to a Netscape cookies.txt file for yt-dlp authentication (e.g., bilibili). `OVS_COOKIES_FROM_BROWSER` is an alternative that reads cookies from a browser directly (e.g., `brave`). File takes precedence if browser is unset; browser takes precedence if both are set. Required for bilibili videos.
 
 ## Caption Fetch Policy
 

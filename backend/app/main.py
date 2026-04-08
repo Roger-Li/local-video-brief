@@ -35,7 +35,12 @@ async def lifespan(app: FastAPI):
 
     storage = StorageService(settings.artifact_root)
     repository = JobRepository(connection)
-    video_source = YtDlpVideoSourceClient(storage, settings.preferred_caption_languages)
+    video_source = YtDlpVideoSourceClient(
+        storage,
+        settings.preferred_caption_languages,
+        cookies_from_browser=settings.cookies_from_browser,
+        cookies_file=settings.cookies_file,
+    )
     transcript_provider = VttTranscriptProvider()
     asr_service = MlxWhisperAsrService(settings)
     chapterer = HeuristicChapterer(settings)

@@ -105,6 +105,12 @@ class Settings:
     enable_study_pack: bool = field(
         default_factory=lambda: os.getenv("OVS_ENABLE_STUDY_PACK", "false").lower() == "true"
     )
+    cookies_from_browser: str = field(
+        default_factory=lambda: os.getenv("OVS_COOKIES_FROM_BROWSER", "")
+    )
+    cookies_file: str = field(
+        default_factory=lambda: os.getenv("OVS_COOKIES_FILE", "")
+    )
 
     def __post_init__(self) -> None:
         object.__setattr__(

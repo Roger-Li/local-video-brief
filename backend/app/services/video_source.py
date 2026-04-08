@@ -18,14 +18,25 @@ class VideoSourceError(RuntimeError):
 
 
 class YtDlpVideoSourceClient:
-    def __init__(self, storage: StorageService, preferred_caption_languages: List[str]) -> None:
+    def __init__(
+        self,
+        storage: StorageService,
+        preferred_caption_languages: List[str],
+        cookies_from_browser: str = "",
+        cookies_file: str = "",
+    ) -> None:
         self.storage = storage
         self.preferred_caption_languages = preferred_caption_languages
+        self._cookie_args: List[str] = []
+        if cookies_from_browser:
+            self._cookie_args = ["--cookies-from-browser", cookies_from_browser]
+        elif cookies_file:
+            self._cookie_args = ["--cookies", cookies_file]
 
     def inspect(self, url: str) -> SourceInspection:
         logger.info("inspect: fetching metadata for %s", url)
         t0 = time.perf_counter()
-        result = self._run_command(["yt-dlp", "--dump-single-json", "--no-warnings", url])
+        result = self._run_command(["yt-dlp", *self._cookie_args, "--dump-single-json", "--no-warnings", url])
         data = json.loads(result.stdout)
         provider = data.get("extractor_key", "unknown")
         title = data.get("title", "?")
@@ -64,6 +75,7 @@ class YtDlpVideoSourceClient:
         self._run_command(
             [
                 "yt-dlp",
+                *self._cookie_args,
                 "--extract-audio",
                 "--audio-format",
                 "mp3",
@@ -87,6 +99,11 @@ class YtDlpVideoSourceClient:
         except subprocess.CalledProcessError as exc:
             stderr = exc.stderr.strip() if exc.stderr else "Unknown extractor failure"
             logger.warning("command failed: %s stderr=%s", " ".join(args[:3]), stderr[:200])
+            if "No video formats found" in stderr and not self._cookie_args:
+                logger.warning(
+                    "This may require authentication. Set OVS_COOKIES_FILE or "
+                    "OVS_COOKIES_FROM_BROWSER in .env — see yt-dlp cookie docs."
+                )
             raise VideoSourceError(stderr) from exc
 
     def _attempt_caption_download(self, output_template: str, url: str, language: str) -> None:
@@ -94,6 +111,7 @@ class YtDlpVideoSourceClient:
             self._run_command(
                 [
                     "yt-dlp",
+                    *self._cookie_args,
                     "--skip-download",
                     "--write-subs",
                     "--write-auto-subs",
