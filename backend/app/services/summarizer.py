@@ -1090,12 +1090,403 @@ class MlxQwenSummaryGenerator:
 
 
 # ---------------------------------------------------------------------------
+# Remote (HTTP) summarizer base — shared by oMLX and DeepSeek
+# ---------------------------------------------------------------------------
+
+class _RemoteSummaryGenerator:
+    """Shared chunking/hierarchical/power-mode logic for remote LLM providers.
+
+    Subclasses override _call_remote() with provider-specific request body
+    and _extract_model_override() with the per-job option key.
+    """
+
+    provider_name: str = "remote"
+    log_prefix: str = "remote"
+
+    def __init__(self, settings: Settings) -> None:
+        self.settings = settings
+
+    # ---- Subclass hooks ----------------------------------------------------
+
+    def _call_remote(
+        self,
+        system_msg: str,
+        user_msg: str,
+        max_tokens: int,
+        artifact_dir: Path | None = None,
+        artifact_label: str = "",
+        model_override: str | None = None,
+        json_mode: bool = False,
+    ) -> str:
+        raise NotImplementedError
+
+    def _extract_model_override(self, opts: dict) -> str | None:
+        return None
+
+    # ---- Token budgets -----------------------------------------------------
+
+    def _chunk_note_tokens(self, multiplier: float = 1.0) -> int:
+        base = max(512, self.settings.summarizer_max_tokens // 4)
+        return int(base * multiplier)
+
+    def _step_tokens(self, multiplier: float = 1.0) -> int:
+        base = max(1024, self.settings.summarizer_max_tokens // 2)
+        return int(base * multiplier)
+
+    # ---- Step helpers ------------------------------------------------------
+
+    def _summarize_chunk(self, chunk_text: str, chapter_title: str,
+                         chunk_index: int, total_chunks: int,
+                         artifact_dir: Path | None = None,
+                         focus_hint: str | None = None,
+                         multiplier: float = 1.0,
+                         model_override: str | None = None) -> str:
+        user_msg = _build_chunk_note_user(chunk_text, chapter_title, chunk_index, total_chunks, focus_hint=focus_hint)
+        raw = self._call_remote(
+            _CHUNK_NOTE_SYSTEM, user_msg, max_tokens=self._chunk_note_tokens(multiplier),
+            artifact_dir=artifact_dir, artifact_label=f"chunk_{chunk_index}",
+            model_override=model_override, json_mode=False,
+        )
+        return raw.strip()
+
+    def _synthesize_chapter(self, chapter: dict, chunk_notes: list[str],
+                            artifact_dir: Path | None = None,
+                            preset: StylePreset | None = None,
+                            focus_hint: str | None = None,
+                            multiplier: float = 1.0,
+                            model_override: str | None = None) -> dict:
+        system_msg = _build_chapter_synthesis_system(preset)
+        user_msg = _build_chapter_synthesis_user(chapter, chunk_notes, focus_hint=focus_hint)
+        raw = self._call_remote(
+            system_msg, user_msg, max_tokens=self._step_tokens(multiplier),
+            artifact_dir=artifact_dir, artifact_label="chapter_synthesis",
+            model_override=model_override, json_mode=True,
+        )
+        return parse_model_json(raw, required_keys={"start_s", "end_s", "title", "summary_en", "summary_zh", "key_points"})
+
+    def _synthesize_overall(self, source_metadata: dict,
+                            chapter_summaries: list[dict],
+                            artifact_dir: Path | None = None,
+                            preset: StylePreset | None = None,
+                            focus_hint: str | None = None,
+                            multiplier: float = 1.0,
+                            model_override: str | None = None) -> dict:
+        system_msg = _build_overall_synthesis_system(preset)
+        user_msg = _build_overall_synthesis_user(source_metadata, chapter_summaries, focus_hint=focus_hint)
+        raw = self._call_remote(
+            system_msg, user_msg, max_tokens=self._step_tokens(multiplier),
+            artifact_dir=artifact_dir, artifact_label="overall_synthesis",
+            model_override=model_override, json_mode=True,
+        )
+        return parse_model_json(raw, required_keys={"summary_en", "summary_zh", "highlights"})
+
+    def _single_shot(
+        self,
+        source_metadata: dict,
+        chapters: list[dict],
+        output_languages: list[str],
+        artifact_dir: Optional[Path] = None,
+        preset: StylePreset | None = None,
+        focus_hint: str | None = None,
+        multiplier: float = 1.0,
+        model_override: str | None = None,
+    ) -> dict:
+        system_msg, user_msg = build_summarizer_prompt(
+            self.settings, source_metadata, chapters, output_languages,
+            preset=preset, focus_hint=focus_hint,
+        )
+        max_tokens = compute_max_tokens(self.settings, len(chapters), multiplier)
+        raw = self._call_remote(
+            system_msg, user_msg, max_tokens=max_tokens,
+            artifact_dir=artifact_dir, artifact_label="single_shot",
+            model_override=model_override, json_mode=True,
+        )
+        parsed = parse_model_json(raw, required_keys={"chapters", "overall_summary"})
+        return _validate_single_shot_payload(parsed, expected_chapters=len(chapters))
+
+    def _summarize_power(
+        self,
+        source_metadata: dict,
+        transcript_segments: list[dict],
+        chapters: list[dict],
+        output_languages: list[str],
+        artifact_dir: Optional[Path],
+        progress_callback: Optional[Callable[[str], None]],
+        opts: dict,
+    ) -> dict:
+        preset = _resolve_preset(opts.get("style_preset"))
+        focus_hint = opts.get("focus_hint")
+        multiplier = preset.max_tokens_multiplier
+        model_override = self._extract_model_override(opts)
+        power_prompt = opts.get("power_prompt") or build_power_default_brief(
+            opts.get("style_preset"), focus_hint,
+        )
+        strategy_override = opts.get("strategy_override", "auto")
+        max_input_chars = self.settings.summarizer_max_input_chars
+
+        if strategy_override == "force_single_shot":
+            strategy = "single_shot"
+            total_chars = sum(len(ch.get("text", "")) for ch in chapters)
+            if total_chars > max_input_chars:
+                logger.warning(
+                    "power force_single_shot: transcript %d chars exceeds max_input_chars %d",
+                    total_chars, max_input_chars,
+                )
+        else:
+            strategy = _choose_strategy(chapters, max_input_chars, _POWER_SINGLE_SHOT_UTILISATION)
+
+        logger.info("%s power mode strategy=%s chapters=%d", self.log_prefix, strategy, len(chapters))
+        if artifact_dir:
+            artifact_dir.mkdir(parents=True, exist_ok=True)
+            (artifact_dir / "summarizer_strategy.txt").write_text(f"power_{strategy}", encoding="utf-8")
+
+        max_tokens = compute_max_tokens(self.settings, len(chapters), multiplier)
+
+        if strategy == "single_shot":
+            if progress_callback:
+                progress_callback("summarizing_single_shot")
+            user_msg = _build_power_user_msg(power_prompt, source_metadata, chapters)
+            raw = self._call_remote(
+                _POWER_MODE_SYSTEM, user_msg, max_tokens=max_tokens,
+                artifact_dir=artifact_dir, artifact_label="power_single_shot",
+                model_override=model_override, json_mode=False,
+            )
+            return _power_stub_result(raw.strip())
+
+        fallback = RuleBasedSummaryGenerator(self.settings)
+        chapter_proses: list[str] = []
+
+        if progress_callback:
+            progress_callback("summarizing_chunks")
+
+        for ch_idx, chapter in enumerate(chapters):
+            ch_artifact = (artifact_dir / f"ch{ch_idx}") if artifact_dir else None
+            seg_chunks = chunk_segments(chapter.get("segments", []), max_input_chars)
+
+            if len(seg_chunks) > 1:
+                notes = []
+                for c_idx, seg_chunk in enumerate(seg_chunks):
+                    text = segments_to_text(seg_chunk)
+                    try:
+                        note = self._summarize_chunk(
+                            text, chapter.get("title_hint", ""),
+                            c_idx, len(seg_chunks), artifact_dir=ch_artifact,
+                            focus_hint=focus_hint, multiplier=multiplier,
+                            model_override=model_override,
+                        )
+                    except Exception as exc:
+                        logger.warning(
+                            "%s power chunk note failed ch=%d chunk=%d: %s",
+                            self.log_prefix, ch_idx, c_idx, exc,
+                        )
+                        note = text
+                    notes.append(note)
+                chapter_text = "\n\n".join(notes)
+            else:
+                chapter_text = chapter.get("text", "")
+
+            if progress_callback:
+                progress_callback("synthesizing_chapters")
+
+            try:
+                user_msg = _build_power_chapter_user_msg(
+                    power_prompt, {**chapter, "text": chapter_text},
+                    ch_idx, len(chapters),
+                )
+                raw = self._call_remote(
+                    _POWER_MODE_SYSTEM, user_msg, max_tokens=self._step_tokens(multiplier),
+                    artifact_dir=ch_artifact, artifact_label="power_chapter",
+                    model_override=model_override, json_mode=False,
+                )
+                prose = raw.strip()
+            except Exception as exc:
+                logger.warning(
+                    "%s power chapter synthesis failed ch=%d: %s, using rule-based fallback",
+                    self.log_prefix, ch_idx, exc,
+                )
+                ch_summary = fallback.summarize_chapter(chapter, ch_idx + 1)
+                prose = _format_rule_based_chapter_as_prose(ch_summary)
+
+            if ch_artifact:
+                ch_artifact.mkdir(parents=True, exist_ok=True)
+                (ch_artifact / "power_chapter_prose.txt").write_text(prose, encoding="utf-8")
+            chapter_proses.append(prose)
+
+        if progress_callback:
+            progress_callback("synthesizing_overall")
+
+        try:
+            user_msg = _build_power_overall_user_msg(power_prompt, source_metadata, chapter_proses)
+            raw = self._call_remote(
+                _POWER_MODE_SYSTEM, user_msg, max_tokens=max_tokens,
+                artifact_dir=artifact_dir, artifact_label="power_overall",
+                model_override=model_override, json_mode=False,
+            )
+            final_prose = raw.strip()
+        except Exception as exc:
+            logger.warning(
+                "%s power overall synthesis failed: %s, concatenating chapter prose",
+                self.log_prefix, exc,
+            )
+            final_prose = "\n\n".join(
+                f"## Chapter {i+1}\n\n{prose}" for i, prose in enumerate(chapter_proses)
+            )
+
+        return _power_stub_result(final_prose)
+
+    def summarize(
+        self,
+        source_metadata: dict,
+        transcript_segments: list[dict],
+        chapters: list[dict],
+        output_languages: list[str],
+        artifact_dir: Optional[Path] = None,
+        progress_callback: Optional[Callable[[str], None]] = None,
+        job_options: dict | None = None,
+    ) -> dict:
+        opts = job_options or {}
+        preset = _resolve_preset(opts.get("style_preset"))
+        focus_hint = opts.get("focus_hint")
+        multiplier = preset.max_tokens_multiplier
+        model_override = self._extract_model_override(opts)
+
+        if opts.get("power_mode"):
+            return self._summarize_power(
+                source_metadata, transcript_segments, chapters,
+                output_languages, artifact_dir, progress_callback, opts,
+            )
+
+        fallback = RuleBasedSummaryGenerator(self.settings)
+        try:
+            max_input_chars = self.settings.summarizer_max_input_chars
+            strategy = _choose_strategy(chapters, max_input_chars)
+            logger.info(
+                "%s summarizer strategy=%s chapters=%d max_input_chars=%d",
+                self.log_prefix, strategy, len(chapters), max_input_chars,
+            )
+
+            if artifact_dir:
+                artifact_dir.mkdir(parents=True, exist_ok=True)
+                (artifact_dir / "summarizer_strategy.txt").write_text(strategy, encoding="utf-8")
+
+            if strategy == "single_shot":
+                if progress_callback:
+                    progress_callback("summarizing_single_shot")
+                return self._single_shot(
+                    source_metadata, chapters, output_languages, artifact_dir=artifact_dir,
+                    preset=preset, focus_hint=focus_hint, multiplier=multiplier,
+                    model_override=model_override,
+                )
+
+            all_chunk_notes: dict[int, list[str]] = {}
+            chapter_summaries: list[dict] = []
+
+            if progress_callback:
+                progress_callback("summarizing_chunks")
+
+            for ch_idx, chapter in enumerate(chapters):
+                seg_chunks = chunk_segments(chapter.get("segments", []), max_input_chars)
+                ch_artifact = (artifact_dir / f"ch{ch_idx}") if artifact_dir else None
+
+                if len(seg_chunks) <= 1:
+                    text = segments_to_text(seg_chunks[0]) if seg_chunks else chapter.get("text", "")
+                    notes = [text]
+                else:
+                    notes = []
+                    for c_idx, seg_chunk in enumerate(seg_chunks):
+                        text = segments_to_text(seg_chunk)
+                        try:
+                            note = self._summarize_chunk(
+                                text, chapter.get("title_hint", ""),
+                                c_idx, len(seg_chunks), artifact_dir=ch_artifact,
+                                focus_hint=focus_hint, multiplier=multiplier,
+                                model_override=model_override,
+                            )
+                        except Exception as exc:
+                            logger.warning(
+                                "%s chunk note failed for chapter=%d chunk=%d (%s: %s), using raw chunk text",
+                                self.log_prefix, ch_idx, c_idx, type(exc).__name__, exc,
+                            )
+                            note = text
+                        notes.append(note)
+                    all_chunk_notes[ch_idx] = notes
+
+                if progress_callback:
+                    progress_callback("synthesizing_chapters")
+
+                try:
+                    ch_summary = self._synthesize_chapter(
+                        chapter, notes, artifact_dir=ch_artifact,
+                        preset=preset, focus_hint=focus_hint, multiplier=multiplier,
+                        model_override=model_override,
+                    )
+                except Exception as exc:
+                    logger.warning(
+                        "%s chapter synthesis failed for chapter=%d (%s: %s), using rule-based chapter fallback",
+                        self.log_prefix, ch_idx, type(exc).__name__, exc,
+                    )
+                    ch_summary = fallback.summarize_chapter(chapter, ch_idx + 1)
+                chapter_summaries.append(ch_summary)
+
+            if progress_callback:
+                progress_callback("synthesizing_overall")
+
+            try:
+                overall = self._synthesize_overall(
+                    source_metadata, chapter_summaries, artifact_dir=artifact_dir,
+                    preset=preset, focus_hint=focus_hint, multiplier=multiplier,
+                    model_override=model_override,
+                )
+            except Exception as exc:
+                logger.warning(
+                    "%s overall synthesis failed (%s: %s), using rule-based overall fallback",
+                    self.log_prefix, type(exc).__name__, exc,
+                )
+                overall = fallback.summarize_overall(
+                    source_metadata=source_metadata,
+                    transcript_segments=transcript_segments,
+                    chapter_summaries=chapter_summaries,
+                )
+
+            if artifact_dir and all_chunk_notes:
+                artifact_dir.mkdir(parents=True, exist_ok=True)
+                (artifact_dir / "chunk_notes.json").write_text(
+                    json.dumps(all_chunk_notes, ensure_ascii=False, indent=2), encoding="utf-8"
+                )
+
+            logger.info(
+                "%s summarization complete: strategy=%s chapters=%d",
+                self.log_prefix, strategy, len(chapter_summaries),
+            )
+            return {"chapters": chapter_summaries, "overall_summary": overall}
+
+        except Exception as exc:
+            logger.warning(
+                "%s summarizer failed (%s: %s), falling back to rule-based",
+                self.log_prefix, type(exc).__name__, exc,
+            )
+            return fallback.summarize(
+                source_metadata=source_metadata,
+                transcript_segments=transcript_segments,
+                chapters=chapters,
+                output_languages=output_languages,
+            )
+
+
+# ---------------------------------------------------------------------------
 # OMLX remote summarizer (OpenAI-compatible)
 # ---------------------------------------------------------------------------
 
-class OmlxSummaryGenerator:
-    def __init__(self, settings: Settings) -> None:
-        self.settings = settings
+class OmlxSummaryGenerator(_RemoteSummaryGenerator):
+    provider_name = "omlx"
+    log_prefix = "omlx"
+
+    def _extract_model_override(self, opts: dict) -> str | None:
+        return opts.get("omlx_model_override") or None
+
+    def _call_remote(self, *args, **kwargs):
+        # Delegate so subclass-style patching of `_call_omlx` continues to work.
+        return self._call_omlx(*args, **kwargs)
 
     def _call_omlx(
         self,
@@ -1105,8 +1496,8 @@ class OmlxSummaryGenerator:
         artifact_dir: Path | None = None,
         artifact_label: str = "",
         model_override: str | None = None,
+        json_mode: bool = False,
     ) -> str:
-        """Send messages to oMLX server, save artifacts, return raw text."""
         import httpx
 
         label = f"_{artifact_label}" if artifact_label else ""
@@ -1156,206 +1547,104 @@ class OmlxSummaryGenerator:
 
         return raw_output
 
-    def _chunk_note_tokens(self, multiplier: float = 1.0) -> int:
-        base = max(512, self.settings.summarizer_max_tokens // 4)
-        return int(base * multiplier)
 
-    def _step_tokens(self, multiplier: float = 1.0) -> int:
-        base = max(1024, self.settings.summarizer_max_tokens // 2)
-        return int(base * multiplier)
+# ---------------------------------------------------------------------------
+# DeepSeek remote summarizer (OpenAI-compatible API)
+# ---------------------------------------------------------------------------
 
-    def _summarize_chunk(self, chunk_text: str, chapter_title: str,
-                         chunk_index: int, total_chunks: int,
-                         artifact_dir: Path | None = None,
-                         focus_hint: str | None = None,
-                         multiplier: float = 1.0,
-                         model_override: str | None = None) -> str:
-        user_msg = _build_chunk_note_user(chunk_text, chapter_title, chunk_index, total_chunks, focus_hint=focus_hint)
-        raw = self._call_omlx(
-            _CHUNK_NOTE_SYSTEM, user_msg, max_tokens=self._chunk_note_tokens(multiplier),
-            artifact_dir=artifact_dir, artifact_label=f"chunk_{chunk_index}",
-            model_override=model_override,
-        )
-        return raw.strip()
+class DeepseekSummaryGenerator(_RemoteSummaryGenerator):
+    provider_name = "deepseek"
+    log_prefix = "deepseek"
 
-    def _synthesize_chapter(self, chapter: dict, chunk_notes: list[str],
-                            artifact_dir: Path | None = None,
-                            preset: StylePreset | None = None,
-                            focus_hint: str | None = None,
-                            multiplier: float = 1.0,
-                            model_override: str | None = None) -> dict:
-        system_msg = _build_chapter_synthesis_system(preset)
-        user_msg = _build_chapter_synthesis_user(chapter, chunk_notes, focus_hint=focus_hint)
-        raw = self._call_omlx(
-            system_msg, user_msg, max_tokens=self._step_tokens(multiplier),
-            artifact_dir=artifact_dir, artifact_label="chapter_synthesis",
-            model_override=model_override,
-        )
-        return parse_model_json(raw, required_keys={"start_s", "end_s", "title", "summary_en", "summary_zh", "key_points"})
+    def _extract_model_override(self, opts: dict) -> str | None:
+        return opts.get("deepseek_model") or None
 
-    def _synthesize_overall(self, source_metadata: dict,
-                            chapter_summaries: list[dict],
-                            artifact_dir: Path | None = None,
-                            preset: StylePreset | None = None,
-                            focus_hint: str | None = None,
-                            multiplier: float = 1.0,
-                            model_override: str | None = None) -> dict:
-        system_msg = _build_overall_synthesis_system(preset)
-        user_msg = _build_overall_synthesis_user(source_metadata, chapter_summaries, focus_hint=focus_hint)
-        raw = self._call_omlx(
-            system_msg, user_msg, max_tokens=self._step_tokens(multiplier),
-            artifact_dir=artifact_dir, artifact_label="overall_synthesis",
-            model_override=model_override,
-        )
-        return parse_model_json(raw, required_keys={"summary_en", "summary_zh", "highlights"})
-
-    def _single_shot(
+    def _call_remote(
         self,
-        source_metadata: dict,
-        chapters: list[dict],
-        output_languages: list[str],
-        artifact_dir: Optional[Path] = None,
-        preset: StylePreset | None = None,
-        focus_hint: str | None = None,
-        multiplier: float = 1.0,
+        system_msg: str,
+        user_msg: str,
+        max_tokens: int,
+        artifact_dir: Path | None = None,
+        artifact_label: str = "",
         model_override: str | None = None,
-    ) -> dict:
-        """Single-shot summarization: all chapters in one prompt, one LLM call."""
-        system_msg, user_msg = build_summarizer_prompt(
-            self.settings, source_metadata, chapters, output_languages,
-            preset=preset, focus_hint=focus_hint,
-        )
-        max_tokens = compute_max_tokens(self.settings, len(chapters), multiplier)
-        raw = self._call_omlx(
-            system_msg, user_msg, max_tokens=max_tokens,
-            artifact_dir=artifact_dir, artifact_label="single_shot",
-            model_override=model_override,
-        )
-        parsed = parse_model_json(raw, required_keys={"chapters", "overall_summary"})
-        return _validate_single_shot_payload(parsed, expected_chapters=len(chapters))
+        json_mode: bool = False,
+    ) -> str:
+        import httpx
 
-    def _summarize_power(
-        self,
-        source_metadata: dict,
-        transcript_segments: list[dict],
-        chapters: list[dict],
-        output_languages: list[str],
-        artifact_dir: Optional[Path],
-        progress_callback: Optional[Callable[[str], None]],
-        opts: dict,
-    ) -> dict:
-        preset = _resolve_preset(opts.get("style_preset"))
-        focus_hint = opts.get("focus_hint")
-        multiplier = preset.max_tokens_multiplier
-        model_override = opts.get("omlx_model_override") or None
-        power_prompt = opts.get("power_prompt") or build_power_default_brief(
-            opts.get("style_preset"), focus_hint,
-        )
-        strategy_override = opts.get("strategy_override", "auto")
-        max_input_chars = self.settings.summarizer_max_input_chars
+        label = f"_{artifact_label}" if artifact_label else ""
+        model = model_override or self.settings.deepseek_model
 
-        if strategy_override == "force_single_shot":
-            strategy = "single_shot"
-            total_chars = sum(len(ch.get("text", "")) for ch in chapters)
-            if total_chars > max_input_chars:
-                logger.warning(
-                    "power force_single_shot: transcript %d chars exceeds max_input_chars %d",
-                    total_chars, max_input_chars,
-                )
-        else:
-            strategy = _choose_strategy(chapters, max_input_chars, _POWER_SINGLE_SHOT_UTILISATION)
+        request_body: dict = {
+            "model": model,
+            "messages": [
+                {"role": "system", "content": system_msg},
+                {"role": "user", "content": user_msg},
+            ],
+            "max_tokens": max_tokens,
+            "stream": False,
+            "thinking": {"type": "disabled"},
+        }
+        if json_mode:
+            request_body["response_format"] = {"type": "json_object"}
 
-        logger.info("omlx power mode strategy=%s chapters=%d", strategy, len(chapters))
         if artifact_dir:
             artifact_dir.mkdir(parents=True, exist_ok=True)
-            (artifact_dir / "summarizer_strategy.txt").write_text(f"power_{strategy}", encoding="utf-8")
-
-        max_tokens = compute_max_tokens(self.settings, len(chapters), multiplier)
-
-        if strategy == "single_shot":
-            if progress_callback:
-                progress_callback("summarizing_single_shot")
-            user_msg = _build_power_user_msg(power_prompt, source_metadata, chapters)
-            raw = self._call_omlx(
-                _POWER_MODE_SYSTEM, user_msg, max_tokens=max_tokens,
-                artifact_dir=artifact_dir, artifact_label="power_single_shot",
-                model_override=model_override,
-            )
-            return _power_stub_result(raw.strip())
-
-        # --- Per-chapter / hierarchical paths ---
-        fallback = RuleBasedSummaryGenerator(self.settings)
-        chapter_proses: list[str] = []
-
-        if progress_callback:
-            progress_callback("summarizing_chunks")
-
-        for ch_idx, chapter in enumerate(chapters):
-            ch_artifact = (artifact_dir / f"ch{ch_idx}") if artifact_dir else None
-            seg_chunks = chunk_segments(chapter.get("segments", []), max_input_chars)
-
-            if len(seg_chunks) > 1:
-                notes = []
-                for c_idx, seg_chunk in enumerate(seg_chunks):
-                    text = segments_to_text(seg_chunk)
-                    try:
-                        note = self._summarize_chunk(
-                            text, chapter.get("title_hint", ""),
-                            c_idx, len(seg_chunks), artifact_dir=ch_artifact,
-                            focus_hint=focus_hint, multiplier=multiplier,
-                            model_override=model_override,
-                        )
-                    except Exception as exc:
-                        logger.warning("omlx power chunk note failed ch=%d chunk=%d: %s", ch_idx, c_idx, exc)
-                        note = text
-                    notes.append(note)
-                chapter_text = "\n\n".join(notes)
-            else:
-                chapter_text = chapter.get("text", "")
-
-            if progress_callback:
-                progress_callback("synthesizing_chapters")
-
-            try:
-                user_msg = _build_power_chapter_user_msg(
-                    power_prompt, {**chapter, "text": chapter_text},
-                    ch_idx, len(chapters),
-                )
-                raw = self._call_omlx(
-                    _POWER_MODE_SYSTEM, user_msg, max_tokens=self._step_tokens(multiplier),
-                    artifact_dir=ch_artifact, artifact_label="power_chapter",
-                    model_override=model_override,
-                )
-                prose = raw.strip()
-            except Exception as exc:
-                logger.warning("omlx power chapter synthesis failed ch=%d: %s, using rule-based fallback", ch_idx, exc)
-                ch_summary = fallback.summarize_chapter(chapter, ch_idx + 1)
-                prose = _format_rule_based_chapter_as_prose(ch_summary)
-
-            if ch_artifact:
-                ch_artifact.mkdir(parents=True, exist_ok=True)
-                (ch_artifact / "power_chapter_prose.txt").write_text(prose, encoding="utf-8")
-            chapter_proses.append(prose)
-
-        # Overall synthesis
-        if progress_callback:
-            progress_callback("synthesizing_overall")
-
-        try:
-            user_msg = _build_power_overall_user_msg(power_prompt, source_metadata, chapter_proses)
-            raw = self._call_omlx(
-                _POWER_MODE_SYSTEM, user_msg, max_tokens=max_tokens,
-                artifact_dir=artifact_dir, artifact_label="power_overall",
-                model_override=model_override,
-            )
-            final_prose = raw.strip()
-        except Exception as exc:
-            logger.warning("omlx power overall synthesis failed: %s, concatenating chapter prose", exc)
-            final_prose = "\n\n".join(
-                f"## Chapter {i+1}\n\n{prose}" for i, prose in enumerate(chapter_proses)
+            prompt_text = f"=== SYSTEM ===\n{system_msg}\n\n=== USER ===\n{user_msg}"
+            (artifact_dir / f"summarizer{label}_prompt.txt").write_text(prompt_text, encoding="utf-8")
+            (artifact_dir / f"summarizer{label}_request.json").write_text(
+                json.dumps(request_body, indent=2, ensure_ascii=False), encoding="utf-8"
             )
 
-        return _power_stub_result(final_prose)
+        url = f"{self.settings.deepseek_base_url}/chat/completions"
+        # API key is sent via Authorization but never logged or persisted.
+        headers: dict[str, str] = {
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {self.settings.deepseek_api_key}",
+        }
+
+        logger.info("deepseek request%s: url=%s model=%s max_tokens=%d json_mode=%s",
+                    label, url, model, max_tokens, json_mode)
+        t0 = time.perf_counter()
+        response = httpx.post(
+            url,
+            json=request_body,
+            headers=headers,
+            timeout=self.settings.deepseek_timeout_seconds,
+        )
+        elapsed = time.perf_counter() - t0
+        logger.info("deepseek response%s: status=%d elapsed=%.1fs", label, response.status_code, elapsed)
+
+        response.raise_for_status()
+        data = response.json()
+        raw_output = data["choices"][0]["message"]["content"]
+
+        if artifact_dir:
+            (artifact_dir / f"summarizer{label}_raw_output.txt").write_text(raw_output, encoding="utf-8")
+
+        return raw_output
+
+
+# ---------------------------------------------------------------------------
+# Routing summarizer — dispatches per-job to oMLX or DeepSeek
+# ---------------------------------------------------------------------------
+
+class RoutingSummaryGenerator:
+    """Picks the per-job remote provider, falling back to the configured default."""
+
+    def __init__(self, default_generator, providers: dict[str, object]) -> None:
+        self._default = default_generator
+        self._providers = providers
+
+    @property
+    def default(self):
+        return self._default
+
+    def _select(self, job_options: dict | None):
+        opts = job_options or {}
+        override = opts.get("summarizer_provider_override")
+        if override and override in self._providers:
+            return self._providers[override]
+        return self._default
 
     def summarize(
         self,
@@ -1367,137 +1656,16 @@ class OmlxSummaryGenerator:
         progress_callback: Optional[Callable[[str], None]] = None,
         job_options: dict | None = None,
     ) -> dict:
-        opts = job_options or {}
-        preset = _resolve_preset(opts.get("style_preset"))
-        focus_hint = opts.get("focus_hint")
-        multiplier = preset.max_tokens_multiplier
-        model_override = opts.get("omlx_model_override") or None
-
-        if opts.get("power_mode"):
-            # Power mode failures propagate to the pipeline (job marked failed).
-            # The user chose power mode deliberately — silently downgrading to
-            # structured output would discard their edited brief.
-            return self._summarize_power(
-                source_metadata, transcript_segments, chapters,
-                output_languages, artifact_dir, progress_callback, opts,
-            )
-
-        fallback = RuleBasedSummaryGenerator(self.settings)
-        try:
-            max_input_chars = self.settings.summarizer_max_input_chars
-            strategy = _choose_strategy(chapters, max_input_chars)
-            logger.info("omlx summarizer strategy=%s chapters=%d max_input_chars=%d",
-                        strategy, len(chapters), max_input_chars)
-
-            if artifact_dir:
-                artifact_dir.mkdir(parents=True, exist_ok=True)
-                (artifact_dir / "summarizer_strategy.txt").write_text(strategy, encoding="utf-8")
-
-            # --- Single-shot path ---
-            if strategy == "single_shot":
-                if progress_callback:
-                    progress_callback("summarizing_single_shot")
-                return self._single_shot(
-                    source_metadata, chapters, output_languages, artifact_dir=artifact_dir,
-                    preset=preset, focus_hint=focus_hint, multiplier=multiplier,
-                    model_override=model_override,
-                )
-
-            # --- Per-chapter / hierarchical paths ---
-            all_chunk_notes: dict[int, list[str]] = {}
-            chapter_summaries: list[dict] = []
-
-            if progress_callback:
-                progress_callback("summarizing_chunks")
-
-            for ch_idx, chapter in enumerate(chapters):
-                seg_chunks = chunk_segments(chapter.get("segments", []), max_input_chars)
-                ch_artifact = (artifact_dir / f"ch{ch_idx}") if artifact_dir else None
-
-                if len(seg_chunks) <= 1:
-                    text = segments_to_text(seg_chunks[0]) if seg_chunks else chapter.get("text", "")
-                    notes = [text]
-                else:
-                    notes = []
-                    for c_idx, seg_chunk in enumerate(seg_chunks):
-                        text = segments_to_text(seg_chunk)
-                        try:
-                            note = self._summarize_chunk(
-                                text, chapter.get("title_hint", ""),
-                                c_idx, len(seg_chunks), artifact_dir=ch_artifact,
-                                focus_hint=focus_hint, multiplier=multiplier,
-                                model_override=model_override,
-                            )
-                        except Exception as exc:
-                            logger.warning(
-                                "omlx chunk note failed for chapter=%d chunk=%d (%s: %s), using raw chunk text",
-                                ch_idx,
-                                c_idx,
-                                type(exc).__name__,
-                                exc,
-                            )
-                            note = text
-                        notes.append(note)
-                    all_chunk_notes[ch_idx] = notes
-
-                if progress_callback:
-                    progress_callback("synthesizing_chapters")
-
-                try:
-                    ch_summary = self._synthesize_chapter(
-                        chapter, notes, artifact_dir=ch_artifact,
-                        preset=preset, focus_hint=focus_hint, multiplier=multiplier,
-                        model_override=model_override,
-                    )
-                except Exception as exc:
-                    logger.warning(
-                        "omlx chapter synthesis failed for chapter=%d (%s: %s), using rule-based chapter fallback",
-                        ch_idx,
-                        type(exc).__name__,
-                        exc,
-                    )
-                    ch_summary = fallback.summarize_chapter(chapter, ch_idx + 1)
-                chapter_summaries.append(ch_summary)
-
-            if progress_callback:
-                progress_callback("synthesizing_overall")
-
-            try:
-                overall = self._synthesize_overall(
-                    source_metadata, chapter_summaries, artifact_dir=artifact_dir,
-                    preset=preset, focus_hint=focus_hint, multiplier=multiplier,
-                    model_override=model_override,
-                )
-            except Exception as exc:
-                logger.warning(
-                    "omlx overall synthesis failed (%s: %s), using rule-based overall fallback",
-                    type(exc).__name__,
-                    exc,
-                )
-                overall = fallback.summarize_overall(
-                    source_metadata=source_metadata,
-                    transcript_segments=transcript_segments,
-                    chapter_summaries=chapter_summaries,
-                )
-
-            if artifact_dir and all_chunk_notes:
-                artifact_dir.mkdir(parents=True, exist_ok=True)
-                (artifact_dir / "chunk_notes.json").write_text(
-                    json.dumps(all_chunk_notes, ensure_ascii=False, indent=2), encoding="utf-8"
-                )
-
-            logger.info("omlx summarization complete: strategy=%s chapters=%d", strategy, len(chapter_summaries))
-            return {"chapters": chapter_summaries, "overall_summary": overall}
-
-        except Exception as exc:
-            logger.warning("omlx summarizer failed (%s: %s), falling back to rule-based",
-                           type(exc).__name__, exc)
-            return fallback.summarize(
-                source_metadata=source_metadata,
-                transcript_segments=transcript_segments,
-                chapters=chapters,
-                output_languages=output_languages,
-            )
+        generator = self._select(job_options)
+        return generator.summarize(
+            source_metadata=source_metadata,
+            transcript_segments=transcript_segments,
+            chapters=chapters,
+            output_languages=output_languages,
+            artifact_dir=artifact_dir,
+            progress_callback=progress_callback,
+            job_options=job_options,
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -1590,9 +1758,15 @@ class RuleBasedSummaryGenerator:
 # Factory
 # ---------------------------------------------------------------------------
 
-def create_summary_generator(settings: Settings):
-    """Return the appropriate SummaryGenerator based on settings."""
-    provider = settings.summarizer_provider
+def _omlx_configured(settings: Settings) -> bool:
+    return bool(settings.omlx_base_url and settings.omlx_model)
+
+
+def _deepseek_configured(settings: Settings) -> bool:
+    return bool(settings.deepseek_api_key)
+
+
+def _build_provider(settings: Settings, provider: str):
     if provider == "omlx":
         try:
             import httpx  # noqa: F401
@@ -1602,8 +1776,44 @@ def create_summary_generator(settings: Settings):
             )
         logger.info("summarizer provider: omlx (url=%s model=%s)", settings.omlx_base_url, settings.omlx_model)
         return OmlxSummaryGenerator(settings)
+    if provider == "deepseek":
+        try:
+            import httpx  # noqa: F401
+        except ImportError:
+            raise RuntimeError(
+                "httpx is not installed. Run `uv sync --extra omlx` to enable DeepSeek summarization."
+            )
+        logger.info(
+            "summarizer provider: deepseek (url=%s model=%s)",
+            settings.deepseek_base_url, settings.deepseek_model,
+        )
+        return DeepseekSummaryGenerator(settings)
     if provider == "mlx":
         logger.info("summarizer provider: mlx (model=%s)", settings.summarizer_model)
         return MlxQwenSummaryGenerator(settings)
     logger.info("summarizer provider: fallback (rule-based)")
     return RuleBasedSummaryGenerator(settings)
+
+
+def create_summary_generator(settings: Settings):
+    """Return the appropriate SummaryGenerator based on settings.
+
+    When more than one remote provider is configured, the result is wrapped in
+    a RoutingSummaryGenerator so per-job ``summarizer_provider_override`` can
+    pick between them. Otherwise the configured default is returned directly.
+    """
+    default = _build_provider(settings, settings.summarizer_provider)
+
+    available: dict[str, object] = {}
+    if _omlx_configured(settings):
+        available["omlx"] = (
+            default if isinstance(default, OmlxSummaryGenerator) else _build_provider(settings, "omlx")
+        )
+    if _deepseek_configured(settings):
+        available["deepseek"] = (
+            default if isinstance(default, DeepseekSummaryGenerator) else _build_provider(settings, "deepseek")
+        )
+
+    if len(available) >= 2:
+        return RoutingSummaryGenerator(default, available)
+    return default

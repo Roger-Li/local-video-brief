@@ -285,6 +285,42 @@ def test_power_options_round_trip() -> None:
     assert fetched.options["strategy_override"] == "force_single_shot"
 
 
+def test_provider_override_accepted_for_known_providers() -> None:
+    for value in ("omlx", "deepseek"):
+        opts = JobOptions(summarizer_provider_override=value)
+        assert opts.summarizer_provider_override == value
+
+
+def test_provider_override_rejected_for_unknown() -> None:
+    with pytest.raises(Exception):
+        JobOptions(summarizer_provider_override="bogus")
+
+
+def test_deepseek_model_accepted_for_known_models() -> None:
+    for value in ("deepseek-v4-flash", "deepseek-v4-pro"):
+        opts = JobOptions(deepseek_model=value)
+        assert opts.deepseek_model == value
+
+
+def test_deepseek_model_rejected_for_unknown() -> None:
+    with pytest.raises(Exception):
+        JobOptions(deepseek_model="deepseek-v4-ultra")
+
+
+def test_round_trip_provider_override_options() -> None:
+    repo = _make_repo()
+    job = repo.create_job(
+        url="https://example.com",
+        output_languages=["en"],
+        mode="captions_first",
+        options={"summarizer_provider_override": "deepseek", "deepseek_model": "deepseek-v4-pro"},
+    )
+    fetched = repo.get_job(job.id)
+    assert fetched is not None
+    assert fetched.options["summarizer_provider_override"] == "deepseek"
+    assert fetched.options["deepseek_model"] == "deepseek-v4-pro"
+
+
 def test_round_trip_new_options() -> None:
     repo = _make_repo()
     job = repo.create_job(

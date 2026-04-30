@@ -1,5 +1,11 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import type { JobOptions, ServerConfig } from "../types/api";
+import type {
+  AvailableProviderInfo,
+  DeepseekModelId,
+  JobOptions,
+  ServerConfig,
+  SummarizerProviderId,
+} from "../types/api";
 import { getPowerPromptDefault } from "../lib/api";
 
 interface JobFormProps {
@@ -7,6 +13,8 @@ interface JobFormProps {
   isPending: boolean;
   serverConfig?: ServerConfig;
 }
+
+const DEFAULT_DEEPSEEK_MODEL: DeepseekModelId = "deepseek-v4-flash";
 
 export function JobForm({ onSubmit, isPending, serverConfig }: JobFormProps) {
   const [url, setUrl] = useState("");
@@ -20,10 +28,22 @@ export function JobForm({ onSubmit, isPending, serverConfig }: JobFormProps) {
   const [powerPrompt, setPowerPrompt] = useState("");
   const [powerPromptDirty, setPowerPromptDirty] = useState(false);
   const [strategyOverride, setStrategyOverride] = useState<"auto" | "force_single_shot">("auto");
+  const [providerSelection, setProviderSelection] = useState<SummarizerProviderId | null>(null);
+  const [deepseekModel, setDeepseekModel] = useState<DeepseekModelId>(DEFAULT_DEEPSEEK_MODEL);
+  const [deepseekModelTouched, setDeepseekModelTouched] = useState(false);
 
   const supportsPrompts = serverConfig?.supports_prompt_customization ?? false;
-  const allowModelOverride = serverConfig?.model_override_allowed ?? false;
   const supportsPowerMode = serverConfig?.supports_power_mode ?? false;
+
+  const availableProviders: AvailableProviderInfo[] = serverConfig?.available_summarizer_providers ?? [];
+  const defaultProvider = (serverConfig?.default_summarizer_provider ?? null) as SummarizerProviderId | null;
+  const showProviderSelector = availableProviders.length >= 2;
+  const activeProviderId: SummarizerProviderId | null =
+    providerSelection ?? (defaultProvider as SummarizerProviderId | null);
+  const activeProvider = availableProviders.find((p) => p.id === activeProviderId) ?? null;
+  const allowModelOverride =
+    activeProvider?.model_override_allowed ?? (serverConfig?.model_override_allowed ?? false);
+  const isDeepseek = activeProviderId === "deepseek";
 
   // Counter guards against stale fetch responses overwriting user edits.
   const fetchIdRef = useRef(0);
@@ -71,7 +91,15 @@ export function JobForm({ onSubmit, isPending, serverConfig }: JobFormProps) {
     if (supportsPrompts) {
       if (stylePreset !== null) opts.style_preset = stylePreset;
       if (focusHint.trim()) opts.focus_hint = focusHint.trim();
-      if (modelOverride.trim()) opts.omlx_model_override = modelOverride.trim();
+      if (allowModelOverride && modelOverride.trim()) {
+        opts.omlx_model_override = modelOverride.trim();
+      }
+    }
+    if (providerSelection !== null && defaultProvider !== null && providerSelection !== defaultProvider) {
+      opts.summarizer_provider_override = providerSelection;
+    }
+    if (isDeepseek && (providerSelection === "deepseek" || deepseekModelTouched)) {
+      opts.deepseek_model = deepseekModel;
     }
     if (powerMode && supportsPowerMode) {
       opts.power_mode = true;
@@ -146,6 +174,43 @@ export function JobForm({ onSubmit, isPending, serverConfig }: JobFormProps) {
           {supportsPrompts && (
             <>
               <div className="options-section-label">Summarization</div>
+
+              {showProviderSelector && (
+                <div className="provider-row">
+                  {availableProviders.map((provider) => {
+                    const checked = activeProviderId === provider.id;
+                    return (
+                      <button
+                        key={provider.id}
+                        type="button"
+                        className={`provider-pill ${checked ? "provider-pill-active" : ""}`}
+                        onClick={() => setProviderSelection(provider.id)}
+                      >
+                        {provider.label}
+                      </button>
+                    );
+                  })}
+                </div>
+              )}
+
+              {isDeepseek && activeProvider?.model_choices && (
+                <label className="field deepseek-model-field">
+                  <span>DeepSeek model</span>
+                  <select
+                    value={deepseekModel}
+                    onChange={(e) => {
+                      setDeepseekModel(e.target.value as DeepseekModelId);
+                      setDeepseekModelTouched(true);
+                    }}
+                  >
+                    {activeProvider.model_choices.map((choice) => (
+                      <option key={choice.id} value={choice.id}>
+                        {choice.label}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+              )}
 
               <div className="preset-row">
                 {(serverConfig?.style_presets ?? []).map((p) => (

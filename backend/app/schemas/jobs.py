@@ -6,6 +6,10 @@ from typing import Any, Dict, List, Optional
 from backend.app.core.style_presets import STYLE_PRESETS
 
 
+_VALID_PROVIDER_OVERRIDES = ("omlx", "deepseek")
+_VALID_DEEPSEEK_MODELS = ("deepseek-v4-flash", "deepseek-v4-pro")
+
+
 class JobOptions(BaseModel):
     enable_study_pack: Optional[bool] = None
     enable_transcript_normalization: Optional[bool] = None
@@ -15,12 +19,34 @@ class JobOptions(BaseModel):
     power_mode: Optional[bool] = None
     power_prompt: Optional[str] = None
     strategy_override: Optional[str] = None
+    summarizer_provider_override: Optional[str] = None
+    deepseek_model: Optional[str] = None
 
     @field_validator("style_preset")
     @classmethod
     def validate_style_preset(cls, v: str | None) -> str | None:
         if v is not None and v not in STYLE_PRESETS:
             raise ValueError(f"Unknown style preset: {v!r}. Must be one of: {', '.join(sorted(STYLE_PRESETS))}")
+        return v
+
+    @field_validator("summarizer_provider_override")
+    @classmethod
+    def validate_provider_override(cls, v: str | None) -> str | None:
+        if v is not None and v not in _VALID_PROVIDER_OVERRIDES:
+            raise ValueError(
+                "summarizer_provider_override must be one of "
+                f"{', '.join(_VALID_PROVIDER_OVERRIDES)} (got {v!r})"
+            )
+        return v
+
+    @field_validator("deepseek_model")
+    @classmethod
+    def validate_deepseek_model(cls, v: str | None) -> str | None:
+        if v is not None and v not in _VALID_DEEPSEEK_MODELS:
+            raise ValueError(
+                "deepseek_model must be one of "
+                f"{', '.join(_VALID_DEEPSEEK_MODELS)} (got {v!r})"
+            )
         return v
 
     @field_validator("focus_hint")

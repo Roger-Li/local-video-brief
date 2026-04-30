@@ -794,6 +794,61 @@ code {
   font-weight: 600;
 }
 
+/* ---- Provider Selector ---- */
+
+.provider-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+}
+
+.provider-pill {
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: var(--radius-pill);
+  padding: 0.4rem 0.85rem;
+  background: transparent;
+  color: var(--muted);
+  font-size: 0.85rem;
+  cursor: pointer;
+  transition:
+    background 0.15s var(--ease),
+    color 0.15s var(--ease),
+    border-color 0.15s var(--ease),
+    transform 0.1s var(--ease);
+}
+
+.provider-pill:hover {
+  color: var(--text);
+  border-color: rgba(255, 255, 255, 0.2);
+}
+
+.provider-pill:active {
+  transform: scale(0.96);
+}
+
+.provider-pill-active {
+  background: rgba(34, 164, 228, 0.18);
+  color: var(--accent-strong);
+  border-color: rgba(34, 164, 228, 0.4);
+}
+
+.deepseek-model-field select {
+  padding: 0.65rem 0.9rem;
+  font-size: 0.95rem;
+  border-radius: var(--radius-input);
+  background: rgba(255, 255, 255, 0.04);
+  color: var(--text);
+  border: 1px solid var(--border-input);
+  appearance: none;
+  cursor: pointer;
+}
+
+.deepseek-model-field select:focus {
+  outline: none;
+  border-color: rgba(77, 212, 198, 0.45);
+  box-shadow: 0 0 0 3px var(--accent-glow);
+}
+
 /* ---- Preset & Mode Pills ---- */
 
 .preset-row {

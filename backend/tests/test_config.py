@@ -93,8 +93,45 @@ def test_provider_defaults_to_fallback(monkeypatch) -> None:
 def test_provider_invalid_raises(monkeypatch) -> None:
     monkeypatch.setenv("OVS_SUMMARIZER_PROVIDER", "invalid")
     import pytest
-    with pytest.raises(ValueError, match="must be fallback, mlx, or omlx"):
+    with pytest.raises(ValueError, match="fallback, mlx, omlx, deepseek"):
         Settings()
+
+
+def test_provider_explicit_deepseek(monkeypatch) -> None:
+    monkeypatch.setenv("OVS_SUMMARIZER_PROVIDER", "deepseek")
+    monkeypatch.setenv("OVS_DEEPSEEK_API_KEY", "sk-test")
+    monkeypatch.delenv("OVS_OMLX_BASE_URL", raising=False)
+    settings = Settings()
+    assert settings.summarizer_provider == "deepseek"
+    assert settings.deepseek_api_key == "sk-test"
+    assert settings.deepseek_base_url == "https://api.deepseek.com"
+    assert settings.deepseek_model == "deepseek-v4-flash"
+    assert settings.deepseek_timeout_seconds == 600
+
+
+def test_deepseek_missing_api_key_raises(monkeypatch) -> None:
+    monkeypatch.setenv("OVS_SUMMARIZER_PROVIDER", "deepseek")
+    monkeypatch.delenv("OVS_DEEPSEEK_API_KEY", raising=False)
+    import pytest
+    with pytest.raises(ValueError, match="OVS_DEEPSEEK_API_KEY is required"):
+        Settings()
+
+
+def test_deepseek_invalid_model_raises(monkeypatch) -> None:
+    monkeypatch.setenv("OVS_SUMMARIZER_PROVIDER", "deepseek")
+    monkeypatch.setenv("OVS_DEEPSEEK_API_KEY", "sk-test")
+    monkeypatch.setenv("OVS_DEEPSEEK_MODEL", "not-a-real-model")
+    import pytest
+    with pytest.raises(ValueError, match="OVS_DEEPSEEK_MODEL"):
+        Settings()
+
+
+def test_deepseek_base_url_strips_trailing_slash(monkeypatch) -> None:
+    monkeypatch.setenv("OVS_SUMMARIZER_PROVIDER", "deepseek")
+    monkeypatch.setenv("OVS_DEEPSEEK_API_KEY", "sk-test")
+    monkeypatch.setenv("OVS_DEEPSEEK_BASE_URL", "https://api.deepseek.com/")
+    settings = Settings()
+    assert settings.deepseek_base_url == "https://api.deepseek.com"
 
 
 def test_omlx_missing_base_url_raises(monkeypatch) -> None:

@@ -51,11 +51,18 @@ def _csv_env(name: str, default: List[str]) -> List[str]:
     return [item.strip() for item in raw_value.split(",") if item.strip()]
 
 
+_VALID_PROVIDERS = ("fallback", "mlx", "omlx", "deepseek")
+_VALID_DEEPSEEK_MODELS = ("deepseek-v4-flash", "deepseek-v4-pro")
+
+
 def _resolve_summarizer_provider() -> str:
     explicit = os.getenv("OVS_SUMMARIZER_PROVIDER", "").strip().lower()
     if explicit:
-        if explicit not in ("fallback", "mlx", "omlx"):
-            raise ValueError(f"OVS_SUMMARIZER_PROVIDER must be fallback, mlx, or omlx (got '{explicit}')")
+        if explicit not in _VALID_PROVIDERS:
+            raise ValueError(
+                "OVS_SUMMARIZER_PROVIDER must be one of "
+                f"{', '.join(_VALID_PROVIDERS)} (got '{explicit}')"
+            )
         return explicit
     if os.getenv("OVS_ENABLE_MLX_SUMMARIZER", "false").lower() == "true":
         return "mlx"
@@ -102,6 +109,16 @@ class Settings:
     omlx_timeout_seconds: int = field(
         default_factory=lambda: int(os.getenv("OVS_OMLX_TIMEOUT_SECONDS", "180"))
     )
+    deepseek_api_key: str = field(default_factory=lambda: os.getenv("OVS_DEEPSEEK_API_KEY", ""))
+    deepseek_base_url: str = field(
+        default_factory=lambda: os.getenv("OVS_DEEPSEEK_BASE_URL", "https://api.deepseek.com").rstrip("/")
+    )
+    deepseek_model: str = field(
+        default_factory=lambda: os.getenv("OVS_DEEPSEEK_MODEL", "deepseek-v4-flash")
+    )
+    deepseek_timeout_seconds: int = field(
+        default_factory=lambda: int(os.getenv("OVS_DEEPSEEK_TIMEOUT_SECONDS", "600"))
+    )
     enable_study_pack: bool = field(
         default_factory=lambda: os.getenv("OVS_ENABLE_STUDY_PACK", "false").lower() == "true"
     )
@@ -128,6 +145,14 @@ class Settings:
                 raise ValueError("OVS_OMLX_BASE_URL is required when OVS_SUMMARIZER_PROVIDER=omlx")
             if not self.omlx_model:
                 raise ValueError("OVS_OMLX_MODEL is required when OVS_SUMMARIZER_PROVIDER=omlx")
+        if self.summarizer_provider == "deepseek":
+            if not self.deepseek_api_key:
+                raise ValueError("OVS_DEEPSEEK_API_KEY is required when OVS_SUMMARIZER_PROVIDER=deepseek")
+        if self.deepseek_model and self.deepseek_model not in _VALID_DEEPSEEK_MODELS:
+            raise ValueError(
+                "OVS_DEEPSEEK_MODEL must be one of "
+                f"{', '.join(_VALID_DEEPSEEK_MODELS)} (got '{self.deepseek_model}')"
+            )
 
 
 @lru_cache(maxsize=1)

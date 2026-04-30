@@ -1,5 +1,9 @@
 export type JobStatus = "queued" | "running" | "completed" | "failed";
 
+export type SummarizerProviderId = "omlx" | "deepseek";
+
+export type DeepseekModelId = "deepseek-v4-flash" | "deepseek-v4-pro";
+
 export interface JobOptions {
   enable_study_pack?: boolean;
   enable_transcript_normalization?: boolean;
@@ -9,6 +13,8 @@ export interface JobOptions {
   power_mode?: boolean;
   power_prompt?: string;
   strategy_override?: "auto" | "force_single_shot";
+  summarizer_provider_override?: SummarizerProviderId;
+  deepseek_model?: DeepseekModelId;
 }
 
 export interface StylePresetInfo {
@@ -17,8 +23,23 @@ export interface StylePresetInfo {
   description: string;
 }
 
+export interface SummarizerProviderModelChoice {
+  id: string;
+  label: string;
+}
+
+export interface AvailableProviderInfo {
+  id: SummarizerProviderId;
+  label: string;
+  current_model: string | null;
+  model_override_allowed: boolean;
+  model_choices?: SummarizerProviderModelChoice[];
+}
+
 export interface ServerConfig {
   summarizer_provider: string;
+  default_summarizer_provider?: string;
+  available_summarizer_providers?: AvailableProviderInfo[];
   current_model: string | null;
   model_override_allowed: boolean;
   supports_prompt_customization: boolean;

@@ -17,6 +17,12 @@ def _mlx_runtime_available() -> bool:
         return False
 
 
+_DEEPSEEK_MODEL_CHOICES = (
+    {"id": "deepseek-v4-flash", "label": "DeepSeek V4 Flash"},
+    {"id": "deepseek-v4-pro", "label": "DeepSeek V4 Pro"},
+)
+
+
 @router.get("/config")
 def get_config(request: Request) -> dict:
     settings = request.app.state.settings
@@ -24,6 +30,9 @@ def get_config(request: Request) -> dict:
 
     if provider == "omlx":
         current_model = settings.omlx_model or None
+        supports_prompts = True
+    elif provider == "deepseek":
+        current_model = settings.deepseek_model or None
         supports_prompts = True
     elif provider == "mlx":
         if _mlx_runtime_available():
@@ -36,8 +45,27 @@ def get_config(request: Request) -> dict:
         current_model = None
         supports_prompts = False
 
+    available_providers: list[dict] = []
+    if settings.omlx_base_url and settings.omlx_model:
+        available_providers.append({
+            "id": "omlx",
+            "label": "Local oMLX",
+            "current_model": settings.omlx_model or None,
+            "model_override_allowed": True,
+        })
+    if settings.deepseek_api_key:
+        available_providers.append({
+            "id": "deepseek",
+            "label": "DeepSeek API",
+            "current_model": settings.deepseek_model or None,
+            "model_override_allowed": False,
+            "model_choices": [dict(item) for item in _DEEPSEEK_MODEL_CHOICES],
+        })
+
     return {
         "summarizer_provider": provider,
+        "default_summarizer_provider": provider,
+        "available_summarizer_providers": available_providers,
         "current_model": current_model,
         "model_override_allowed": provider == "omlx",
         "supports_prompt_customization": supports_prompts,

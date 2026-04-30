@@ -11,8 +11,10 @@ import pytest
 from backend.app.core.config import Settings
 from backend.app.core.style_presets import STYLE_PRESETS
 from backend.app.services.summarizer import (
+    DeepseekSummaryGenerator,
     MlxQwenSummaryGenerator,
     OmlxSummaryGenerator,
+    RoutingSummaryGenerator,
     RuleBasedSummaryGenerator,
     _POWER_MODE_SYSTEM,
     _build_chapter_synthesis_system,
@@ -1223,3 +1225,238 @@ class TestPowerModeOmlxDispatch:
                     output_languages=["en", "zh-CN"],
                     job_options={"power_mode": True, "strategy_override": "force_single_shot"},
                 )
+
+
+# ---------------------------------------------------------------------------
+# DeepSeek provider tests
+# ---------------------------------------------------------------------------
+
+def _deepseek_settings(**overrides) -> Settings:
+    env = {
+        "OVS_SUMMARIZER_PROVIDER": "deepseek",
+        "OVS_DEEPSEEK_API_KEY": "sk-test",
+    }
+    env.update(overrides)
+    saved = {}
+    for k, v in env.items():
+        saved[k] = os.environ.get(k)
+        os.environ[k] = v
+    try:
+        return Settings()
+    finally:
+        for k, prev in saved.items():
+            if prev is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = prev
+
+
+class TestDeepseekRequestBody:
+    def test_json_mode_request_body_includes_response_format(self):
+        settings = _deepseek_settings()
+        gen = DeepseekSummaryGenerator(settings)
+        response = _make_openai_response(json.dumps(VALID_SUMMARY))
+        with patch("httpx.post", return_value=response) as mock_post:
+            gen.summarize(SAMPLE_METADATA, SAMPLE_SEGMENTS, SAMPLE_CHAPTERS, ["en", "zh-CN"])
+        call = mock_post.call_args
+        body = call[1]["json"]
+        assert body["model"] == "deepseek-v4-flash"
+        assert body["stream"] is False
+        assert body["thinking"] == {"type": "disabled"}
+        assert body["response_format"] == {"type": "json_object"}
+        # No oMLX-specific keys leak through.
+        assert "chat_template_kwargs" not in body
+
+    def test_authorization_header_uses_bearer_api_key(self):
+        settings = _deepseek_settings()
+        gen = DeepseekSummaryGenerator(settings)
+        response = _make_openai_response(json.dumps(VALID_SUMMARY))
+        with patch("httpx.post", return_value=response) as mock_post:
+            gen.summarize(SAMPLE_METADATA, SAMPLE_SEGMENTS, SAMPLE_CHAPTERS, ["en", "zh-CN"])
+        headers = mock_post.call_args[1]["headers"]
+        assert headers["Authorization"] == "Bearer sk-test"
+
+    def test_request_url_uses_deepseek_endpoint(self):
+        settings = _deepseek_settings()
+        gen = DeepseekSummaryGenerator(settings)
+        response = _make_openai_response(json.dumps(VALID_SUMMARY))
+        with patch("httpx.post", return_value=response) as mock_post:
+            gen.summarize(SAMPLE_METADATA, SAMPLE_SEGMENTS, SAMPLE_CHAPTERS, ["en", "zh-CN"])
+        url = mock_post.call_args[0][0]
+        assert url == "https://api.deepseek.com/chat/completions"
+
+    def test_deepseek_model_per_job_override(self):
+        settings = _deepseek_settings()
+        gen = DeepseekSummaryGenerator(settings)
+        response = _make_openai_response(json.dumps(VALID_SUMMARY))
+        with patch("httpx.post", return_value=response) as mock_post:
+            gen.summarize(
+                SAMPLE_METADATA, SAMPLE_SEGMENTS, SAMPLE_CHAPTERS, ["en", "zh-CN"],
+                job_options={"deepseek_model": "deepseek-v4-pro"},
+            )
+        assert mock_post.call_args[1]["json"]["model"] == "deepseek-v4-pro"
+
+    def test_omlx_model_override_ignored_by_deepseek(self):
+        settings = _deepseek_settings()
+        gen = DeepseekSummaryGenerator(settings)
+        response = _make_openai_response(json.dumps(VALID_SUMMARY))
+        with patch("httpx.post", return_value=response) as mock_post:
+            gen.summarize(
+                SAMPLE_METADATA, SAMPLE_SEGMENTS, SAMPLE_CHAPTERS, ["en", "zh-CN"],
+                job_options={"omlx_model_override": "should-be-ignored"},
+            )
+        # Falls back to settings.deepseek_model, ignoring oMLX-specific override.
+        assert mock_post.call_args[1]["json"]["model"] == "deepseek-v4-flash"
+
+    def test_power_mode_request_body_omits_response_format(self):
+        """Power mode produces prose; response_format must not be sent."""
+        settings = _deepseek_settings()
+        gen = DeepseekSummaryGenerator(settings)
+        response = _make_openai_response("# Prose summary")
+        with patch("httpx.post", return_value=response) as mock_post:
+            gen.summarize(
+                SAMPLE_METADATA, SAMPLE_SEGMENTS, SAMPLE_CHAPTERS, ["en", "zh-CN"],
+                job_options={"power_mode": True, "strategy_override": "force_single_shot"},
+            )
+        body = mock_post.call_args[1]["json"]
+        assert "response_format" not in body
+        assert body["thinking"] == {"type": "disabled"}
+
+    def test_chunk_note_request_body_omits_response_format(self):
+        """Chunk-note (hierarchical) calls produce prose; no response_format."""
+        settings = _deepseek_settings(OVS_SUMMARIZER_MAX_INPUT_CHARS="5000")
+        gen = DeepseekSummaryGenerator(settings)
+        # Multi-chunk chapter A produces 2 chunk note calls (prose),
+        # then per-chapter syntheses (json), then overall (json).
+        captured = []
+
+        def post(*args, **kwargs):
+            captured.append(kwargs.get("json", {}))
+            # Cycle through deterministic JSON payloads for json-mode calls.
+            text = "Chunk note prose."
+            if len(captured) >= 3:
+                text = json.dumps(VALID_OVERALL_SUMMARY)
+            if len(captured) == 3:
+                text = json.dumps(CHAPTER_SUMMARY_A)
+            if len(captured) == 4:
+                text = json.dumps(CHAPTER_SUMMARY_B)
+            return _make_openai_response(text)
+
+        with patch("httpx.post", side_effect=post):
+            gen.summarize(SAMPLE_METADATA, SAMPLE_SEGMENTS, MULTI_CHAPTER_LIST, ["en", "zh-CN"])
+
+        # First two requests are chunk notes — must NOT have response_format.
+        assert "response_format" not in captured[0]
+        assert "response_format" not in captured[1]
+        # Subsequent JSON-mode requests must include it.
+        assert captured[2].get("response_format") == {"type": "json_object"}
+
+    def test_fallback_on_http_error(self):
+        settings = _deepseek_settings()
+        gen = DeepseekSummaryGenerator(settings)
+        bad = httpx.Response(
+            status_code=500, text="boom",
+            request=httpx.Request("POST", "https://api.deepseek.com/chat/completions"),
+        )
+        with patch("httpx.post", return_value=bad):
+            result = gen.summarize(SAMPLE_METADATA, SAMPLE_SEGMENTS, SAMPLE_CHAPTERS, ["en", "zh-CN"])
+        # Rule-based fallback used.
+        assert result["chapters"][0]["title"] == "Chapter 1"
+
+    def test_power_mode_failure_propagates(self):
+        settings = _deepseek_settings()
+        gen = DeepseekSummaryGenerator(settings)
+        bad = httpx.Response(
+            status_code=500, text="boom",
+            request=httpx.Request("POST", "https://api.deepseek.com/chat/completions"),
+        )
+        with patch("httpx.post", return_value=bad):
+            with pytest.raises(Exception):
+                gen.summarize(
+                    SAMPLE_METADATA, SAMPLE_SEGMENTS, SAMPLE_CHAPTERS, ["en", "zh-CN"],
+                    job_options={"power_mode": True, "strategy_override": "force_single_shot"},
+                )
+
+
+# ---------------------------------------------------------------------------
+# Routing summary generator tests
+# ---------------------------------------------------------------------------
+
+class TestRoutingSummaryGenerator:
+    def _make(self, default_id: str = "omlx"):
+        captured = {"calls": []}
+
+        class StubGen:
+            def __init__(self, name):
+                self.name = name
+
+            def summarize(self, **kwargs):
+                captured["calls"].append((self.name, kwargs.get("job_options") or {}))
+                return {"chapters": [], "overall_summary": {"summary_en": self.name, "summary_zh": "", "highlights": []}}
+
+        omlx = StubGen("omlx")
+        deepseek = StubGen("deepseek")
+        default = omlx if default_id == "omlx" else deepseek
+        return RoutingSummaryGenerator(default, {"omlx": omlx, "deepseek": deepseek}), captured
+
+    def test_dispatch_to_default_when_no_override(self):
+        router, captured = self._make("omlx")
+        router.summarize(
+            source_metadata=SAMPLE_METADATA,
+            transcript_segments=SAMPLE_SEGMENTS,
+            chapters=SAMPLE_CHAPTERS,
+            output_languages=["en"],
+        )
+        assert captured["calls"][0][0] == "omlx"
+
+    def test_dispatch_to_override(self):
+        router, captured = self._make("omlx")
+        router.summarize(
+            source_metadata=SAMPLE_METADATA,
+            transcript_segments=SAMPLE_SEGMENTS,
+            chapters=SAMPLE_CHAPTERS,
+            output_languages=["en"],
+            job_options={"summarizer_provider_override": "deepseek"},
+        )
+        assert captured["calls"][0][0] == "deepseek"
+
+    def test_unknown_override_falls_back_to_default(self):
+        router, captured = self._make("omlx")
+        router.summarize(
+            source_metadata=SAMPLE_METADATA,
+            transcript_segments=SAMPLE_SEGMENTS,
+            chapters=SAMPLE_CHAPTERS,
+            output_languages=["en"],
+            job_options={"summarizer_provider_override": "nope"},
+        )
+        assert captured["calls"][0][0] == "omlx"
+
+
+class TestFactoryRouting:
+    def test_factory_returns_routing_when_both_remote_configured(self, monkeypatch):
+        monkeypatch.setenv("OVS_SUMMARIZER_PROVIDER", "omlx")
+        monkeypatch.setenv("OVS_OMLX_BASE_URL", "http://localhost:8080/v1")
+        monkeypatch.setenv("OVS_OMLX_MODEL", "test-model")
+        monkeypatch.setenv("OVS_DEEPSEEK_API_KEY", "sk-test")
+        settings = Settings()
+        gen = create_summary_generator(settings)
+        assert isinstance(gen, RoutingSummaryGenerator)
+        assert isinstance(gen.default, OmlxSummaryGenerator)
+
+    def test_factory_returns_deepseek_when_only_deepseek_configured(self, monkeypatch):
+        monkeypatch.setenv("OVS_SUMMARIZER_PROVIDER", "deepseek")
+        monkeypatch.setenv("OVS_DEEPSEEK_API_KEY", "sk-test")
+        monkeypatch.delenv("OVS_OMLX_BASE_URL", raising=False)
+        monkeypatch.delenv("OVS_OMLX_MODEL", raising=False)
+        settings = Settings()
+        gen = create_summary_generator(settings)
+        assert isinstance(gen, DeepseekSummaryGenerator)
+
+    def test_factory_returns_omlx_only_when_deepseek_unconfigured(self, monkeypatch):
+        monkeypatch.setenv("OVS_SUMMARIZER_PROVIDER", "omlx")
+        monkeypatch.setenv("OVS_OMLX_BASE_URL", "http://localhost:8080/v1")
+        monkeypatch.setenv("OVS_OMLX_MODEL", "test-model")
+        monkeypatch.delenv("OVS_DEEPSEEK_API_KEY", raising=False)
+        settings = Settings()
+        gen = create_summary_generator(settings)
+        assert isinstance(gen, OmlxSummaryGenerator)

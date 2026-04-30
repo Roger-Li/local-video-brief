@@ -56,6 +56,24 @@ def test_config_returns_supports_power_mode() -> None:
             assert data["supports_power_mode"] is False
 
 
+def test_config_exposes_default_and_available_providers() -> None:
+    with TestClient(app) as client:
+        data = client.get("/config").json()
+        assert "default_summarizer_provider" in data
+        assert data["default_summarizer_provider"] == data["summarizer_provider"]
+        assert "available_summarizer_providers" in data
+        assert isinstance(data["available_summarizer_providers"], list)
+
+
+def test_config_omits_deepseek_when_unconfigured(monkeypatch) -> None:
+    """When OVS_DEEPSEEK_API_KEY is not set, DeepSeek must not appear in the list."""
+    monkeypatch.delenv("OVS_DEEPSEEK_API_KEY", raising=False)
+    with TestClient(app) as client:
+        data = client.get("/config").json()
+        ids = {entry["id"] for entry in data["available_summarizer_providers"]}
+        assert "deepseek" not in ids
+
+
 def test_power_prompt_default_endpoint() -> None:
     with TestClient(app) as client:
         resp = client.get("/config/power-prompt-default")
