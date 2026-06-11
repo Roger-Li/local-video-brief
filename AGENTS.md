@@ -99,7 +99,7 @@ OVS_TEST_WORKER_CONCURRENCY=2 ./scripts/test_video_job.sh "<url1>" "<url2>"   # 
 - Ten options: `enable_study_pack`, `enable_transcript_normalization`, `style_preset`, `focus_hint`, `omlx_model_override`, `power_mode`, `power_prompt`, `strategy_override`, `summarizer_provider_override`, `deepseek_model`. `null` = use server default.
 - `summarizer_provider_override` switches between *remote* providers (`omlx`/`deepseek`) per job, dispatched by `RoutingSummaryGenerator`. The `mlx` provider remains startup-only because it loads a multi-GB model into GPU memory.
 - Frontend: collapsible "Options" section in `JobForm.tsx` below the URL field. Prompt controls (presets, focus hint, model override) are capability-gated via `GET /config`.
-- The URL field is a multi-line textarea (one URL per line); all options apply to every job in the batch. Submitted jobs appear in a job list panel (`GET /jobs`, polled while any job is active) with per-job result selection.
+- The URL field is a multi-line textarea (one URL per line, max 20 per batch); all options apply to every job in the batch. Submitted jobs appear in a job list panel (`GET /jobs`, polled while any job is active) with per-job result selection.
 
 ## Configurable Prompts
 

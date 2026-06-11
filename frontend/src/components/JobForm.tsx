@@ -16,6 +16,9 @@ interface JobFormProps {
 
 const DEFAULT_DEEPSEEK_MODEL: DeepseekModelId = "deepseek-v4-flash";
 
+// Keeps every batch well inside the job-list polling window (limit 200).
+export const MAX_BATCH_URLS = 20;
+
 export function parseUrls(text: string): string[] {
   return text
     .split("\n")
@@ -125,6 +128,10 @@ export function JobForm({ onSubmit, isPending, serverConfig }: JobFormProps) {
         const urls = parseUrls(urlsText);
         if (urls.length === 0) {
           setUrlError("Enter at least one video URL.");
+          return;
+        }
+        if (urls.length > MAX_BATCH_URLS) {
+          setUrlError(`Maximum ${MAX_BATCH_URLS} URLs per batch (got ${urls.length}).`);
           return;
         }
         const invalid = urls.find((line) => !/^https?:\/\//.test(line));

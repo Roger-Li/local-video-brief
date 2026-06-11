@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import sqlite3
 import threading
+import time
 
 import pytest
 
@@ -125,6 +126,18 @@ class _FlakyPipeline:
         self._repo.update_job(job_id, status=JobStatus.COMPLETED, progress_stage="completed")
 
 
+class _SlowPipeline:
+    """Takes long enough that stop() races an in-flight job."""
+
+    def __init__(self, repo: JobRepository, delay: float = 0.3) -> None:
+        self._repo = repo
+        self._delay = delay
+
+    def process_job(self, job_id: str) -> None:
+        time.sleep(self._delay)
+        self._repo.update_job(job_id, status=JobStatus.COMPLETED, progress_stage="completed")
+
+
 async def _wait_until(predicate, attempts: int = 200, delay: float = 0.05) -> None:
     for _ in range(attempts):
         if predicate():
@@ -196,7 +209,25 @@ def test_worker_survives_pipeline_exception(monkeypatch: pytest.MonkeyPatch) -> 
             await queue.stop()
 
     asyncio.run(scenario())
-    # The crashing first job stays claimed (the real pipeline marks its own
-    # failures); the worker kept running and finished the second job.
-    assert repo.get_job(first).status == JobStatus.RUNNING
+    # The worker marks the crashed job failed (instead of leaving it running
+    # forever) and keeps going: it also finished the second job.
+    failed_job = repo.get_job(first)
+    assert failed_job.status == JobStatus.FAILED
+    assert "boom" in (failed_job.error or "")
     assert pipeline.calls == 2
+
+
+def test_stop_drains_inflight_job(monkeypatch: pytest.MonkeyPatch) -> None:
+    settings = _make_settings(monkeypatch, "1")
+    repo = _make_repo()
+    job_id = _create_jobs(repo, 1)[0]
+    queue = JobQueueService(settings, repo, _SlowPipeline(repo))
+
+    async def scenario() -> None:
+        await queue.start()
+        await _wait_until(lambda: repo.get_job(job_id).status == JobStatus.RUNNING)
+        # stop() must wait for the in-flight pipeline thread, not abandon it.
+        await queue.stop()
+
+    asyncio.run(scenario())
+    assert repo.get_job(job_id).status == JobStatus.COMPLETED

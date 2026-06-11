@@ -31,7 +31,9 @@ export default function App() {
 
   const jobsQuery = useQuery({
     queryKey: ["jobs"],
-    queryFn: () => listJobs(),
+    // API max; combined with JobForm's batch cap this keeps every active
+    // job inside the polled window so none silently stops updating.
+    queryFn: () => listJobs(200),
     refetchInterval: (query) => {
       const jobs = query.state.data?.jobs ?? [];
       return jobs.some((job) => job.status === "queued" || job.status === "running")

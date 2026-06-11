@@ -109,6 +109,17 @@ describe("JobForm", () => {
     expect(screen.getByText(/not a valid url/i)).toBeInTheDocument();
   });
 
+  it("rejects batches over the URL cap with inline error", () => {
+    const onSubmit = vi.fn();
+    const { container } = render(<JobForm onSubmit={onSubmit} isPending={false} />);
+    const input = screen.getByPlaceholderText(/youtube/i);
+    const urls = Array.from({ length: 21 }, (_, i) => `https://example.com/v${i}`).join("\n");
+    fireEvent.change(input, { target: { value: urls } });
+    fireEvent.submit(container.querySelector("form")!);
+    expect(onSubmit).not.toHaveBeenCalled();
+    expect(screen.getByText(/maximum 20 urls/i)).toBeInTheDocument();
+  });
+
   it("button label pluralizes for multiple urls", () => {
     render(<JobForm onSubmit={vi.fn()} isPending={false} />);
     const input = screen.getByPlaceholderText(/youtube/i);
