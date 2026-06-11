@@ -8,6 +8,9 @@ def get_connection(database_path: Path) -> sqlite3.Connection:
     database_path.parent.mkdir(parents=True, exist_ok=True)
     connection = sqlite3.connect(database_path, check_same_thread=False)
     connection.row_factory = sqlite3.Row
+    # Wait instead of erroring if another process (e.g. a smoke-test backend)
+    # holds a write lock on the same database file.
+    connection.execute("PRAGMA busy_timeout = 5000")
     return connection
 
 

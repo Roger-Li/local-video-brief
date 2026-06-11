@@ -126,6 +126,10 @@ class JobStatusResponse(BaseModel):
     updated_at: str
 
 
+class JobListResponse(BaseModel):
+    jobs: List[JobStatusResponse]
+
+
 class TranscriptStats(BaseModel):
     raw_segment_count: int = 0
     normalized_segment_count: int = 0

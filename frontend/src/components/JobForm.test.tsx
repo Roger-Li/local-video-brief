@@ -61,10 +61,62 @@ describe("JobForm", () => {
     fireEvent.submit(container.querySelector("form")!);
     expect(onSubmit).toHaveBeenCalledWith(
       expect.objectContaining({
-        url: "https://www.youtube.com/watch?v=test",
+        urls: ["https://www.youtube.com/watch?v=test"],
         options: undefined,
       }),
     );
+  });
+
+  it("submits multiple urls one per line", () => {
+    const onSubmit = vi.fn();
+    const { container } = render(<JobForm onSubmit={onSubmit} isPending={false} />);
+    const input = screen.getByPlaceholderText(/youtube/i);
+    fireEvent.change(input, {
+      target: { value: "https://www.youtube.com/watch?v=one\nhttps://youtu.be/two" },
+    });
+    fireEvent.submit(container.querySelector("form")!);
+    expect(onSubmit).toHaveBeenCalledWith(
+      expect.objectContaining({
+        urls: ["https://www.youtube.com/watch?v=one", "https://youtu.be/two"],
+      }),
+    );
+  });
+
+  it("ignores blank lines and trims whitespace", () => {
+    const onSubmit = vi.fn();
+    const { container } = render(<JobForm onSubmit={onSubmit} isPending={false} />);
+    const input = screen.getByPlaceholderText(/youtube/i);
+    fireEvent.change(input, {
+      target: { value: "  https://www.youtube.com/watch?v=one  \n\n\n https://youtu.be/two\n" },
+    });
+    fireEvent.submit(container.querySelector("form")!);
+    expect(onSubmit).toHaveBeenCalledWith(
+      expect.objectContaining({
+        urls: ["https://www.youtube.com/watch?v=one", "https://youtu.be/two"],
+      }),
+    );
+  });
+
+  it("rejects non-http lines with inline error and does not submit", () => {
+    const onSubmit = vi.fn();
+    const { container } = render(<JobForm onSubmit={onSubmit} isPending={false} />);
+    const input = screen.getByPlaceholderText(/youtube/i);
+    fireEvent.change(input, {
+      target: { value: "https://www.youtube.com/watch?v=one\nnot-a-url" },
+    });
+    fireEvent.submit(container.querySelector("form")!);
+    expect(onSubmit).not.toHaveBeenCalled();
+    expect(screen.getByText(/not a valid url/i)).toBeInTheDocument();
+  });
+
+  it("button label pluralizes for multiple urls", () => {
+    render(<JobForm onSubmit={vi.fn()} isPending={false} />);
+    const input = screen.getByPlaceholderText(/youtube/i);
+    expect(screen.getByText("Create summary job")).toBeInTheDocument();
+    fireEvent.change(input, {
+      target: { value: "https://a.example/1\nhttps://b.example/2\nhttps://c.example/3" },
+    });
+    expect(screen.getByText("Create 3 summary jobs")).toBeInTheDocument();
   });
 
   it("submits with study pack enabled", () => {

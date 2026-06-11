@@ -5,6 +5,7 @@ import time
 from pathlib import Path
 
 from backend.app.core.config import Settings
+from backend.app.services.gpu_lock import GPU_LOCK
 from backend.app.utils.text import detect_language
 
 logger = logging.getLogger(__name__)
@@ -50,10 +51,11 @@ class MlxWhisperAsrService:
         audio_size_mb = audio_path.stat().st_size / (1024 * 1024)
         logger.info("ASR start: model=%s audio=%s (%.1f MB)", model_name, audio_path.name, audio_size_mb)
         t0 = time.perf_counter()
-        result = transcribe(
-            str(audio_path),
-            path_or_hf_repo=model_name,
-        )
+        with GPU_LOCK:
+            result = transcribe(
+                str(audio_path),
+                path_or_hf_repo=model_name,
+            )
         elapsed = time.perf_counter() - t0
         logger.info("ASR transcription complete in %.1fs, language=%s", elapsed, result.get("language", "?"))
 

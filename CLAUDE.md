@@ -19,7 +19,7 @@ This repository builds a local-first video summary tool for Apple Silicon Macs. 
 - Start full stack (backend + frontend): `./scripts/dev_server.sh`
 - Backend only: `uvicorn backend.app.main:app --host 127.0.0.1 --port 8010`
 - Frontend only: `cd frontend && npm run dev`
-- Backend tests: `python3 -m pytest backend/tests` (240 tests)
+- Backend tests: `python3 -m pytest backend/tests` (291 tests; 2 of them assume DeepSeek is unconfigured and fail when `.env` sets `OVS_DEEPSEEK_API_KEY`)
 - Frontend tests: `cd frontend && npx vitest run` (`npm run test` may fail if vitest is not on PATH)
 - Build frontend: `cd frontend && npx vite build` (`npm run build` runs `tsc` first, which has pre-existing type errors in node_modules from dependency version mismatches — use `npx vite build` to verify the production bundle directly)
 
@@ -38,9 +38,11 @@ This repository builds a local-first video summary tool for Apple Silicon Macs. 
 - Successful smoke-test runs should work without the frontend.
 - For real provider tests, prefer `scripts/test_video_job.sh` over ad hoc curl sequences because it forces the required ASR flags and captures logs and outputs.
 - `OVS_ENABLE_MLX_ASR=true` is required for videos without usable captions.
-- `OVS_SUMMARIZER_PROVIDER` selects the summarizer: `fallback` (rule-based), `mlx` (in-process mlx-lm), or `omlx` (remote oMLX server). If unset, falls back to `mlx` when `OVS_ENABLE_MLX_SUMMARIZER=true`, else `fallback`.
+- `OVS_SUMMARIZER_PROVIDER` selects the summarizer: `fallback` (rule-based), `mlx` (in-process mlx-lm), `omlx` (remote oMLX server), or `deepseek` (DeepSeek API). If unset, falls back to `mlx` when `OVS_ENABLE_MLX_SUMMARIZER=true`, else `fallback`.
 - `OVS_ENABLE_MLX_SUMMARIZER=true` is a legacy shorthand for `OVS_SUMMARIZER_PROVIDER=mlx`; the fallback summarizer extracts transcript sentences only.
 - When `provider=omlx`, `OVS_OMLX_BASE_URL` and `OVS_OMLX_MODEL` are required. Optional: `OVS_OMLX_API_KEY`, `OVS_OMLX_TIMEOUT_SECONDS` (default 180).
+- When `provider=deepseek`, `OVS_DEEPSEEK_API_KEY` is required. Optional: `OVS_DEEPSEEK_BASE_URL` (default `https://api.deepseek.com`), `OVS_DEEPSEEK_MODEL` (`deepseek-v4-flash` | `deepseek-v4-pro`, default flash), `OVS_DEEPSEEK_TIMEOUT_SECONDS` (default 600). DeepSeek is also offered as a per-job provider whenever the API key is set, regardless of the default provider.
+- `OVS_WORKER_CONCURRENCY` (default 2) sets the job worker pool size. GPU-bound stages (mlx-whisper ASR, in-process MLX generation) are serialized by a process-wide GPU lock, so parallelism mainly speeds up network-bound stages and remote-provider summarization.
 - `OVS_ENABLE_TRANSCRIPT_NORMALIZATION=true` (default) runs dedup/cleanup; set to `false` to bypass.
 - The smoke-test script accepts `OVS_TEST_PYTHON` to override the Python interpreter (e.g., `OVS_TEST_PYTHON=$HOME/ml-env/bin/python`).
 - `OVS_COOKIES_FILE` points to a Netscape cookies.txt file for yt-dlp authentication (e.g., bilibili). `OVS_COOKIES_FROM_BROWSER` is an alternative that reads cookies from a browser directly (e.g., `brave`). File takes precedence if browser is unset; browser takes precedence if both are set. Required for bilibili videos.
@@ -70,6 +72,7 @@ This repository builds a local-first video summary tool for Apple Silicon Macs. 
 OVS_TEST_ENABLE_MLX_SUMMARIZER=true ./scripts/test_video_job.sh "https://youtu.be/j190mwiVlwA"
 OVS_TEST_SUMMARIZER_PROVIDER=omlx OVS_OMLX_BASE_URL=http://localhost:8080/v1 OVS_OMLX_MODEL=<model> ./scripts/test_video_job.sh
 OVS_TEST_POWER_MODE=true OVS_TEST_SUMMARIZER_PROVIDER=omlx OVS_OMLX_BASE_URL=http://localhost:8080/v1 OVS_OMLX_MODEL=<model> ./scripts/test_video_job.sh
+OVS_TEST_WORKER_CONCURRENCY=2 ./scripts/test_video_job.sh "<url1>" "<url2>"   # parallel batch
 ```
 
 - Successful smoke-test outputs are written to `artifacts/test-runs/<job-id>-result.json`.
@@ -77,8 +80,8 @@ OVS_TEST_POWER_MODE=true OVS_TEST_SUMMARIZER_PROVIDER=omlx OVS_OMLX_BASE_URL=htt
 
 ## Summarizer
 
-- Three providers behind the `SummaryGenerator` protocol: `RuleBasedSummaryGenerator`, `MlxQwenSummaryGenerator`, `OmlxSummaryGenerator`.
-- `create_summary_generator(settings)` factory in `summarizer.py` selects the provider; called from `main.py` at startup.
+- Four providers behind the `SummaryGenerator` protocol: `RuleBasedSummaryGenerator`, `MlxQwenSummaryGenerator`, `OmlxSummaryGenerator`, `DeepseekSummaryGenerator`.
+- `create_summary_generator(settings)` factory in `summarizer.py` selects the provider; called from `main.py` at startup. When two or more providers are configured it returns a `RoutingSummaryGenerator` that dispatches per job via `summarizer_provider_override`.
 - The MLX summarizer uses `tokenizer.apply_chat_template(enable_thinking=False)` to suppress Qwen3.5 thinking mode.
 - All providers fall back to rule-based output on failure. oMLX runtime failures (timeout, HTTP errors, bad JSON) trigger fallback; config errors (missing URL/model) fail at startup.
 - The rule-based fallback caps summaries at 500 chars to prevent transcript dumps when text lacks sentence punctuation.
@@ -93,9 +96,10 @@ OVS_TEST_POWER_MODE=true OVS_TEST_SUMMARIZER_PROVIDER=omlx OVS_OMLX_BASE_URL=htt
 ## Per-Job Options
 
 - Optional per-job overrides via `options` field on `CreateJobRequest`. When omitted, all settings fall back to server defaults.
-- Eight options: `enable_study_pack`, `enable_transcript_normalization`, `style_preset`, `focus_hint`, `omlx_model_override`, `power_mode`, `power_prompt`, `strategy_override`. `null` = use server default.
-- `summarizer_provider` is **not** per-job — the MLX provider loads a multi-GB model into GPU memory at startup.
+- Ten options: `enable_study_pack`, `enable_transcript_normalization`, `style_preset`, `focus_hint`, `omlx_model_override`, `power_mode`, `power_prompt`, `strategy_override`, `summarizer_provider_override`, `deepseek_model`. `null` = use server default.
+- `summarizer_provider_override` switches between *remote* providers (`omlx`/`deepseek`) per job, dispatched by `RoutingSummaryGenerator`. The `mlx` provider remains startup-only because it loads a multi-GB model into GPU memory.
 - Frontend: collapsible "Options" section in `JobForm.tsx` below the URL field. Prompt controls (presets, focus hint, model override) are capability-gated via `GET /config`.
+- The URL field is a multi-line textarea (one URL per line); all options apply to every job in the batch. Submitted jobs appear in a job list panel (`GET /jobs`, polled while any job is active) with per-job result selection.
 
 ## Configurable Prompts
 
@@ -124,7 +128,7 @@ OVS_TEST_POWER_MODE=true OVS_TEST_SUMMARIZER_PROVIDER=omlx OVS_OMLX_BASE_URL=htt
 - Provider rate limits can still block extraction entirely.
 - There is no auth, cloud sync, OCR, diarization, or Q&A flow in this repo.
 - Transcript normalization handles most rolling-caption patterns but may leave residual duplication in edge cases.
-- The summarizer worker processes jobs sequentially; concurrent submissions queue up.
+- Jobs run in parallel up to `OVS_WORKER_CONCURRENCY` (default 2). GPU-bound stages (ASR, in-process MLX summarization) are serialized by a process-wide GPU lock, so `mlx`-provider jobs gain little wall-clock speedup from parallelism; remote providers (`omlx`/`deepseek`) and the fallback overlap fully.
 - The study pack is fully deterministic (no LLM calls). Section refinement splits oversized chapters but additional sub-sections use extracted transcript sentences, not LLM summaries.
 - Chaptering splits purely on duration (8 min) and gap (45s) thresholds with no semantic awareness. Continuous lectures without natural pauses get uniform time-based chapters.
 

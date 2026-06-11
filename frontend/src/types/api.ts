@@ -72,6 +72,10 @@ export interface JobStatusResponse {
   updated_at: string;
 }
 
+export interface JobListResponse {
+  jobs: JobStatusResponse[];
+}
+
 export interface TranscriptSegment {
   start_s: number;
   end_s: number;

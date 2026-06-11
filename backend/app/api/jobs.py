@@ -1,16 +1,33 @@
 from __future__ import annotations
 
-from fastapi import APIRouter, HTTPException, Request, status
+from fastapi import APIRouter, HTTPException, Query, Request, status
 
+from backend.app.models.job import JobRecord
 from backend.app.schemas.jobs import (
     CreateJobRequest,
     CreateJobResponse,
+    JobListResponse,
     JobResultResponse,
     JobStatusResponse,
     TranscriptStats,
 )
 
 router = APIRouter(prefix="/jobs", tags=["jobs"])
+
+
+def _to_status_response(job: JobRecord) -> JobStatusResponse:
+    return JobStatusResponse(
+        job_id=job.id,
+        url=job.url,
+        status=job.status,
+        progress_stage=job.progress_stage,
+        provider=job.provider,
+        detected_language=job.detected_language,
+        error=job.error,
+        options=job.options or None,
+        created_at=job.created_at,
+        updated_at=job.updated_at,
+    )
 
 
 @router.post("", response_model=CreateJobResponse, status_code=status.HTTP_201_CREATED)
@@ -26,24 +43,20 @@ def create_job(payload: CreateJobRequest, request: Request) -> CreateJobResponse
     return CreateJobResponse(job_id=job.id, status=job.status)
 
 
+@router.get("", response_model=JobListResponse)
+def list_jobs(request: Request, limit: int = Query(default=50, ge=1, le=200)) -> JobListResponse:
+    repository = request.app.state.job_repository
+    jobs = repository.list_recent_jobs(limit=limit)
+    return JobListResponse(jobs=[_to_status_response(job) for job in jobs])
+
+
 @router.get("/{job_id}", response_model=JobStatusResponse)
 def get_job(job_id: str, request: Request) -> JobStatusResponse:
     repository = request.app.state.job_repository
     job = repository.get_job(job_id)
     if job is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Job not found")
-    return JobStatusResponse(
-        job_id=job.id,
-        url=job.url,
-        status=job.status,
-        progress_stage=job.progress_stage,
-        provider=job.provider,
-        detected_language=job.detected_language,
-        error=job.error,
-        options=job.options or None,
-        created_at=job.created_at,
-        updated_at=job.updated_at,
-    )
+    return _to_status_response(job)
 
 
 @router.get("/{job_id}/result", response_model=JobResultResponse)
@@ -72,4 +85,3 @@ def get_job_result(job_id: str, request: Request) -> JobResultResponse:
         study_pack=job.result_payload.get("study_pack"),
         raw_summary_text=job.result_payload.get("raw_summary_text"),
     )
-
