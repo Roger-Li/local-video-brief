@@ -9,6 +9,7 @@ from typing import Callable, Optional
 
 from backend.app.core.config import Settings
 from backend.app.core.style_presets import STYLE_PRESETS, StylePreset
+from backend.app.services.gpu_lock import GPU_LOCK
 from backend.app.utils.text import chunk_segments, chunk_text, segments_to_text, split_sentences
 
 logger = logging.getLogger(__name__)
@@ -704,21 +705,22 @@ class MlxQwenSummaryGenerator:
         artifact_label: str = "",
     ) -> str:
         """Apply chat template, call mlx_lm.generate, save artifacts, return raw text."""
-        self._ensure_model_loaded()
-        prompt = self._apply_chat_template(system_msg, user_msg)
-        label = f"_{artifact_label}" if artifact_label else ""
-        logger.info("mlx prompt%s built: %d chars", label, len(prompt))
+        with GPU_LOCK:
+            self._ensure_model_loaded()
+            prompt = self._apply_chat_template(system_msg, user_msg)
+            label = f"_{artifact_label}" if artifact_label else ""
+            logger.info("mlx prompt%s built: %d chars", label, len(prompt))
 
-        if artifact_dir:
-            artifact_dir.mkdir(parents=True, exist_ok=True)
-            (artifact_dir / f"summarizer{label}_prompt.txt").write_text(prompt, encoding="utf-8")
+            if artifact_dir:
+                artifact_dir.mkdir(parents=True, exist_ok=True)
+                (artifact_dir / f"summarizer{label}_prompt.txt").write_text(prompt, encoding="utf-8")
 
-        from mlx_lm import generate  # type: ignore[import-not-found]
+            from mlx_lm import generate  # type: ignore[import-not-found]
 
-        logger.info("mlx generating%s (max_tokens=%d)...", label, max_tokens)
-        t0 = time.perf_counter()
-        raw_output = generate(self._model, self._tokenizer, prompt=prompt, max_tokens=max_tokens)
-        elapsed = time.perf_counter() - t0
+            logger.info("mlx generating%s (max_tokens=%d)...", label, max_tokens)
+            t0 = time.perf_counter()
+            raw_output = generate(self._model, self._tokenizer, prompt=prompt, max_tokens=max_tokens)
+            elapsed = time.perf_counter() - t0
         logger.info("mlx generation%s complete: %d chars in %.1fs", label, len(raw_output), elapsed)
 
         if artifact_dir:
@@ -1061,14 +1063,19 @@ class MlxQwenSummaryGenerator:
         if self._model is not None and self._tokenizer is not None:
             logger.info("model already loaded: %s", self.settings.summarizer_model)
             return
-        try:
-            from mlx_lm import load  # type: ignore[import-not-found]
-        except ImportError:
-            raise RuntimeError("mlx-lm is not installed. Run `uv sync --extra mlx` to enable MLX summarization.")
-        logger.info("loading model: %s ...", self.settings.summarizer_model)
-        t0 = time.perf_counter()
-        self._model, self._tokenizer = load(self.settings.summarizer_model)
-        logger.info("model loaded in %.1fs", time.perf_counter() - t0)
+        with GPU_LOCK:
+            # Re-check inside the lock: another worker may have loaded the
+            # multi-GB model while this one was waiting.
+            if self._model is not None and self._tokenizer is not None:
+                return
+            try:
+                from mlx_lm import load  # type: ignore[import-not-found]
+            except ImportError:
+                raise RuntimeError("mlx-lm is not installed. Run `uv sync --extra mlx` to enable MLX summarization.")
+            logger.info("loading model: %s ...", self.settings.summarizer_model)
+            t0 = time.perf_counter()
+            self._model, self._tokenizer = load(self.settings.summarizer_model)
+            logger.info("model loaded in %.1fs", time.perf_counter() - t0)
 
     def _apply_chat_template(self, system_msg: str, user_msg: str) -> str:
         if hasattr(self._tokenizer, "apply_chat_template"):

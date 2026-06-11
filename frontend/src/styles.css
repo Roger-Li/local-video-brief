@@ -1134,3 +1134,87 @@ code {
     margin-bottom: 0.25rem;
   }
 }
+
+/* ---- Job List ---- */
+
+.job-list-panel h2 {
+  margin: 0 0 0.9rem;
+  font-size: 1.05rem;
+  letter-spacing: 0.02em;
+}
+
+.job-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+
+.job-row {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  width: 100%;
+  padding: 0.65rem 0.85rem;
+  background: rgba(255, 255, 255, 0.03);
+  border: 1px solid var(--panel-border);
+  border-radius: 12px;
+  color: var(--text);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+  transition: transform 0.25s var(--ease), border-color 0.25s var(--ease),
+    background 0.25s var(--ease);
+}
+
+.job-row:hover {
+  transform: translateY(-1px);
+  border-color: rgba(77, 212, 198, 0.3);
+  background: rgba(77, 212, 198, 0.06);
+}
+
+.job-row:active {
+  transform: scale(0.99);
+}
+
+.job-row-active {
+  background: rgba(77, 212, 198, 0.1);
+  border-color: rgba(77, 212, 198, 0.45);
+}
+
+.job-row .status-pill {
+  flex-shrink: 0;
+  font-size: 0.7rem;
+  padding: 0.25rem 0.6rem;
+}
+
+.job-row-url {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 0.88rem;
+}
+
+.job-row-stage {
+  flex-shrink: 0;
+  color: var(--muted);
+  font-size: 0.8rem;
+}
+
+.job-row-time {
+  flex-shrink: 0;
+  color: var(--muted);
+  font-size: 0.78rem;
+  opacity: 0.8;
+}
+
+.url-textarea {
+  resize: vertical;
+  min-height: 2.6rem;
+  font: inherit;
+}
+
+.url-error {
+  margin-top: -0.5rem;
+}

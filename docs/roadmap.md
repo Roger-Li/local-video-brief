@@ -11,6 +11,8 @@
 - **Configurable prompts and model selection** — Style presets (default, detailed, concise, technical, academic), content-focus hints, and oMLX model override from the frontend. `GET /config` endpoint with capability flags gates UI controls per provider. Token budgets clamped to avoid exceeding provider limits.
 - **Power mode (v3)** — Opt-in expert path: editable summary brief, force single-shot toggle, and free-form prose/markdown output. `GET /config/power-prompt-default` derives the brief from guided settings. Multi-step paths (per-chapter, hierarchical) produce prose through power-specific prompts. Study pack skipped for power mode. Spec: `docs/specs/configurable-prompts-v3-power-mode.md`.
 - **Frontend UI beautification** — Midnight Ocean dark theme (deep navy + teal/blue accents), DM Serif Display hero heading, CSS entry animations, micro-interactions (button shimmer, hover lifts, focus glow rings), animated progress bar on status card, staggered chapter card reveals, CSS chapter counters, transcript row tinting. Google Fonts loaded for IBM Plex Sans + DM Serif Display.
+- **DeepSeek per-job provider** — DeepSeek API as a summarizer alongside oMLX, selectable per job via `summarizer_provider_override` with a Flash/Pro model dropdown (`deepseek_model`). `RoutingSummaryGenerator` dispatches per job; `/config` advertises available providers gated on `OVS_DEEPSEEK_API_KEY`. Spec: `docs/specs/deepseek-summarizer-selection.md`.
+- **Parallel multi-video summarization** — Worker pool (`OVS_WORKER_CONCURRENCY`, default 2) with an atomic SQLite job claim and a process-wide GPU lock serializing mlx-whisper ASR and in-process MLX generation. `GET /jobs` list endpoint, multi-URL submission (one per line) and a job list panel with per-job result selection in the frontend. Smoke test accepts multiple URLs for batch validation.
 
 ## Future
 
@@ -18,14 +20,10 @@
 
 Expose chunking strategy and context window assumptions to the user. Some local models support long enough context for single-shot summarization + Q&A without chapter splitting. Add overrides for `max_input_chars` and a "force single-shot" toggle. (Note: Power mode's `force_single_shot` strategy already addresses part of this.)
 
-### 2. Parallel Multi-Video Summarization
-
-Batch processing of multiple videos simultaneously. The current sequential worker is the bottleneck. Needs a worker pool or async queue.
-
-### 3. Podcast and Audio-Only Support
+### 2. Podcast and Audio-Only Support
 
 Accept RSS feeds, direct audio files, and podcast URLs — not just YouTube/bilibili. yt-dlp handles some podcasts already; the gap is direct audio file input without a video URL.
 
-### 4. Browser Extension / Desktop App
+### 3. Browser Extension / Desktop App
 
 Detect YouTube/bilibili video pages, trigger summary jobs against the local backend, and display results in a sidebar overlay. Nice-to-have, not urgent.

@@ -77,6 +77,7 @@ class Settings:
     )
     artifact_root: Path = field(default_factory=lambda: Path(os.getenv("OVS_ARTIFACT_ROOT", "artifacts")))
     worker_poll_interval: int = field(default_factory=lambda: int(os.getenv("OVS_WORKER_POLL_INTERVAL", "2")))
+    worker_concurrency: int = field(default_factory=lambda: int(os.getenv("OVS_WORKER_CONCURRENCY", "2")))
     default_output_languages: List[str] = field(default_factory=list)
     preferred_caption_languages: List[str] = field(default_factory=list)
     summarizer_provider: str = field(default_factory=_resolve_summarizer_provider)
@@ -140,6 +141,8 @@ class Settings:
             "preferred_caption_languages",
             _csv_env("OVS_PREFERRED_CAPTION_LANGUAGES", ["en", "zh-Hans", "zh-Hant", "zh-CN", "zh-TW"]),
         )
+        if self.worker_concurrency < 1:
+            raise ValueError("OVS_WORKER_CONCURRENCY must be >= 1")
         if self.summarizer_provider == "omlx":
             if not self.omlx_base_url:
                 raise ValueError("OVS_OMLX_BASE_URL is required when OVS_SUMMARIZER_PROVIDER=omlx")

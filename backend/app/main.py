@@ -65,7 +65,9 @@ async def lifespan(app: FastAPI):
         yield
     finally:
         await queue.stop()
-        connection.close()
+        # Close via the repository so the close waits for any worker thread
+        # still inside a statement (a raw connection.close() here can segfault).
+        repository.close()
 
 
 app = FastAPI(title=get_settings().app_name, lifespan=lifespan)

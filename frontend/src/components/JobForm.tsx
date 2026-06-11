@@ -9,15 +9,26 @@ import type {
 import { getPowerPromptDefault } from "../lib/api";
 
 interface JobFormProps {
-  onSubmit: (payload: { url: string; output_languages: string[]; mode: "captions_first"; options?: JobOptions }) => void;
+  onSubmit: (payload: { urls: string[]; output_languages: string[]; mode: "captions_first"; options?: JobOptions }) => void;
   isPending: boolean;
   serverConfig?: ServerConfig;
 }
 
 const DEFAULT_DEEPSEEK_MODEL: DeepseekModelId = "deepseek-v4-flash";
 
+// Keeps every batch well inside the job-list polling window (limit 200).
+export const MAX_BATCH_URLS = 20;
+
+export function parseUrls(text: string): string[] {
+  return text
+    .split("\n")
+    .map((line) => line.trim())
+    .filter((line) => line.length > 0);
+}
+
 export function JobForm({ onSubmit, isPending, serverConfig }: JobFormProps) {
-  const [url, setUrl] = useState("");
+  const [urlsText, setUrlsText] = useState("");
+  const [urlError, setUrlError] = useState<string | null>(null);
   const [showOptions, setShowOptions] = useState(false);
   const [enableStudyPack, setEnableStudyPack] = useState<boolean | null>(null);
   const [enableNormalization, setEnableNormalization] = useState<boolean | null>(null);
@@ -114,8 +125,23 @@ export function JobForm({ onSubmit, isPending, serverConfig }: JobFormProps) {
       className="panel form-panel"
       onSubmit={(event) => {
         event.preventDefault();
+        const urls = parseUrls(urlsText);
+        if (urls.length === 0) {
+          setUrlError("Enter at least one video URL.");
+          return;
+        }
+        if (urls.length > MAX_BATCH_URLS) {
+          setUrlError(`Maximum ${MAX_BATCH_URLS} URLs per batch (got ${urls.length}).`);
+          return;
+        }
+        const invalid = urls.find((line) => !/^https?:\/\//.test(line));
+        if (invalid) {
+          setUrlError(`Not a valid URL: ${invalid}`);
+          return;
+        }
+        setUrlError(null);
         onSubmit({
-          url,
+          urls,
           output_languages: ["en", "zh-CN"],
           mode: "captions_first",
           options: buildOptions(),
@@ -132,15 +158,20 @@ export function JobForm({ onSubmit, isPending, serverConfig }: JobFormProps) {
       </div>
 
       <label className="field">
-        <span>Video URL</span>
-        <input
-          type="url"
-          placeholder="https://www.youtube.com/watch?v=..."
-          value={url}
-          onChange={(event) => setUrl(event.target.value)}
+        <span>Video URLs (one per line)</span>
+        <textarea
+          className="url-textarea"
+          placeholder={"https://www.youtube.com/watch?v=..."}
+          value={urlsText}
+          onChange={(event) => {
+            setUrlsText(event.target.value);
+            if (urlError) setUrlError(null);
+          }}
+          rows={2}
           required
         />
       </label>
+      {urlError && <p className="error-banner url-error">{urlError}</p>}
 
       <button
         type="button"
@@ -343,7 +374,11 @@ export function JobForm({ onSubmit, isPending, serverConfig }: JobFormProps) {
       )}
 
       <button className="primary-button" type="submit" disabled={isPending}>
-        {isPending ? "Submitting..." : "Create summary job"}
+        {isPending
+          ? "Submitting..."
+          : parseUrls(urlsText).length > 1
+            ? `Create ${parseUrls(urlsText).length} summary jobs`
+            : "Create summary job"}
       </button>
     </form>
   );

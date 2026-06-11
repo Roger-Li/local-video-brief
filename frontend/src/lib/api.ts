@@ -1,6 +1,7 @@
 import type {
   CreateJobRequest,
   CreateJobResponse,
+  JobListResponse,
   JobResultResponse,
   JobStatusResponse,
   ServerConfig,
@@ -33,6 +34,10 @@ export function createJob(payload: CreateJobRequest): Promise<CreateJobResponse>
 
 export function getJob(jobId: string): Promise<JobStatusResponse> {
   return request<JobStatusResponse>(`/jobs/${jobId}`);
+}
+
+export function listJobs(limit = 50): Promise<JobListResponse> {
+  return request<JobListResponse>(`/jobs?limit=${limit}`);
 }
 
 export function getJobResult(jobId: string): Promise<JobResultResponse> {

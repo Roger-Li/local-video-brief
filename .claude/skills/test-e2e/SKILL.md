@@ -1,7 +1,7 @@
 ---
 name: test-e2e
 description: Run end-to-end pipeline tests against real video URLs to validate feature changes. Use when the user wants to test with real videos, validate summarization, or verify pipeline behavior after code changes.
-argument-hint: [video-url] [--provider fallback|mlx|omlx] [--timeout 300] [--allow-section-refinement] [--expect-timestamps] [--no-frontend]
+argument-hint: [video-url...] [--provider fallback|mlx|omlx|deepseek] [--parallel] [--concurrency 2] [--timeout 300] [--allow-section-refinement] [--expect-timestamps] [--no-frontend]
 disable-model-invocation: true
 ---
 
@@ -14,7 +14,9 @@ Run end-to-end tests against real video URLs to validate the full pipeline: back
 - `$ARGUMENTS` contains the raw arguments string
 - Parse video URLs (anything starting with `http`) and flags from the arguments
 - Supported flags:
-  - `--provider <fallback|mlx|omlx>` — summarizer provider (default: reads from `.env` or falls back to `fallback`)
+  - `--provider <fallback|mlx|omlx|deepseek>` — summarizer provider (default: reads from `.env` or falls back to `fallback`)
+  - `--parallel` — with 2+ URLs, submit them as concurrent jobs against ONE backend instance (exercises the worker pool) instead of sequential separate runs
+  - `--concurrency <N>` — worker pool size for `--parallel` runs (default: 2; sets `OVS_TEST_WORKER_CONCURRENCY`)
   - `--timeout <seconds>` — oMLX timeout (default: 300)
   - `--asr` — force enable MLX ASR even if captions are available
   - `--allow-section-refinement` — allow `study_pack.sections` to differ from chapter count for Phase B v2+
@@ -33,6 +35,12 @@ Run end-to-end tests against real video URLs to validate the full pipeline: back
    - Read `OVS_OMLX_BASE_URL`, `OVS_OMLX_MODEL`, `OVS_OMLX_API_KEY` from the environment or `.env` file
    - If not set, query the oMLX server at common ports (8000, 8080) via `curl /v1/models` to auto-discover
    - Print the effective oMLX config (redact API key)
+
+2b. If provider is `deepseek`:
+   - Read `OVS_DEEPSEEK_API_KEY` from the environment or `.env` file; abort with a clear message if missing
+   - Optionally read `OVS_DEEPSEEK_BASE_URL`, `OVS_DEEPSEEK_MODEL`, `OVS_DEEPSEEK_TIMEOUT_SECONDS`
+   - Print the effective DeepSeek config (redact the API key — print only "set")
+   - Pass these through to the smoke test invocation alongside `OVS_TEST_SUMMARIZER_PROVIDER=deepseek`
 
 3. Clear stale DB before each run: `rm -f data/local_video_brief.sqlite3`
 
@@ -58,9 +66,34 @@ OVS_TEST_MAX_POLLS=300 \
 ./scripts/test_video_job.sh "<url>"
 ```
 
+## Parallel Batch Mode
+
+With `--parallel` and 2+ URLs, run ONE smoke-test invocation against ONE backend (the script accepts multiple URLs, submits all jobs up front, and polls them together):
+
+```bash
+rm -f data/local_video_brief.sqlite3
+OVS_TEST_WORKER_CONCURRENCY=<N> \
+OVS_TEST_SUMMARIZER_PROVIDER=<provider> \
+OVS_ENABLE_STUDY_PACK=true \
+OVS_TEST_PYTHON=<python_path> \
+./scripts/test_video_job.sh "<url1>" "<url2>" ...
+```
+
+After the run:
+
+- Capture the `job_id=<id>` lines from the script output and validate **each** `artifacts/test-runs/<job-id>-result.json` with `validate_e2e_run.py` (do not use the single-newest-file pattern).
+- Verify true concurrency from the backend log: the second `pipeline START` line must appear before the first `pipeline COMPLETED` line:
+
+```bash
+grep -nE "pipeline (START|COMPLETED)" "artifacts/test-runs/backend-${PORT}.log"
+```
+
+- Report overlap yes/no in the output table.
+- Note: with provider `mlx`, GPU stages are serialized by the process-wide GPU lock, so `--parallel` proves queueing correctness rather than wall-clock speedup. `fallback`, `omlx`, and `deepseek` demonstrate real overlap.
+
 ## Result Inspection
 
-After each run, validate the saved result automatically with the helper script:
+After each run, validate the saved result(s) automatically with the helper script. For single-URL runs:
 
 ```bash
 RESULT_PATH="$(ls -t artifacts/test-runs/*-result.json | head -1)"
@@ -72,9 +105,11 @@ VALIDATE_ARGS=(
 )
 ```
 
+For `--parallel` runs, loop over each job's result file instead of taking the newest.
+
 Add flags based on the run:
 
-- If provider is `mlx` or `omlx`, append `--expect-llm-artifacts`
+- If provider is `mlx`, `omlx`, or `deepseek`, append `--expect-llm-artifacts`
 - If provider is `omlx`, append `--expect-omlx-request`
 - If `--allow-section-refinement` was passed, append `--allow-section-refinement`
 - If `--expect-timestamps` was passed, append `--expect-timestamp-markdown`
@@ -159,7 +194,7 @@ For each URL, report:
 
 ## Multiple URLs
 
-If multiple URLs are provided, run them sequentially (they share GPU resources). Present each result separately, then a final summary table.
+Without `--parallel`, run multiple URLs sequentially as separate smoke-test invocations (isolated backends). With `--parallel`, use the batch mode above — one backend, concurrent jobs. Present each result separately, then a final summary table including the concurrency-overlap check for parallel runs.
 
 ## Error Handling
 

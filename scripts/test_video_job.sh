@@ -2,7 +2,12 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-URL="${1:-https://www.bilibili.com/video/BV1E8UQBeEzg}"
+# Accept any number of video URLs; jobs are submitted up front and polled
+# together, exercising the worker pool (OVS_TEST_WORKER_CONCURRENCY).
+URLS=("$@")
+if [[ ${#URLS[@]} -eq 0 ]]; then
+  URLS=("https://www.bilibili.com/video/BV1E8UQBeEzg")
+fi
 PORT="${OVS_TEST_PORT:-8010}"
 HOST="127.0.0.1"
 BASE_URL="http://${HOST}:${PORT}"
@@ -10,6 +15,7 @@ LOG_DIR="${ROOT_DIR}/artifacts/test-runs"
 SERVER_LOG="${LOG_DIR}/backend-${PORT}.log"
 ENABLE_SUMMARIZER="${OVS_TEST_ENABLE_MLX_SUMMARIZER:-false}"
 PYTHON="${OVS_TEST_PYTHON:-${ROOT_DIR}/.venv/bin/python}"
+WORKER_CONCURRENCY="${OVS_TEST_WORKER_CONCURRENCY:-2}"
 
 # Provider resolution: explicit OVS_TEST_SUMMARIZER_PROVIDER wins,
 # then legacy OVS_TEST_ENABLE_MLX_SUMMARIZER=true maps to mlx,
@@ -52,20 +58,28 @@ fi
 
 echo "Verifying project runtime..."
 echo "summarizer_provider=${SUMMARIZER_PROVIDER}"
+echo "worker_concurrency=${WORKER_CONCURRENCY}"
 if [[ "${SUMMARIZER_PROVIDER}" == "omlx" ]]; then
   echo "omlx_base_url=${OVS_OMLX_BASE_URL:-(not set)}"
   echo "omlx_model=${OVS_OMLX_MODEL:-(not set)}"
   echo "omlx_api_key=${OVS_OMLX_API_KEY:+set}"
 fi
+if [[ "${SUMMARIZER_PROVIDER}" == "deepseek" ]]; then
+  echo "deepseek_base_url=${OVS_DEEPSEEK_BASE_URL:-(default)}"
+  echo "deepseek_model=${OVS_DEEPSEEK_MODEL:-(default)}"
+  echo "deepseek_api_key=${OVS_DEEPSEEK_API_KEY:+set}"
+fi
 OVS_ENABLE_MLX_ASR=true \
 OVS_SUMMARIZER_PROVIDER="${SUMMARIZER_PROVIDER}" \
 OVS_ENABLE_MLX_SUMMARIZER="${ENABLE_SUMMARIZER}" \
+OVS_WORKER_CONCURRENCY="${WORKER_CONCURRENCY}" \
 "${PYTHON}" - <<'PY'
 import importlib.util
 from backend.app.core.config import get_settings
 
 settings = get_settings()
 print(f"summarizer_provider={settings.summarizer_provider}")
+print(f"worker_concurrency={settings.worker_concurrency}")
 print(f"enable_mlx_asr={settings.enable_mlx_asr}")
 print(f"enable_mlx_summarizer={settings.enable_mlx_summarizer}")
 print(f"mlx_whisper_installed={importlib.util.find_spec('mlx_whisper') is not None}")
@@ -77,6 +91,7 @@ echo "Starting isolated backend on ${BASE_URL}..."
 OVS_ENABLE_MLX_ASR=true \
 OVS_SUMMARIZER_PROVIDER="${SUMMARIZER_PROVIDER}" \
 OVS_ENABLE_MLX_SUMMARIZER="${ENABLE_SUMMARIZER}" \
+OVS_WORKER_CONCURRENCY="${WORKER_CONCURRENCY}" \
 "${PYTHON}" -m uvicorn backend.app.main:app --host "${HOST}" --port "${PORT}" >"${SERVER_LOG}" 2>&1 &
 SERVER_PID=$!
 
@@ -106,52 +121,75 @@ if [[ "${POWER_MODE}" == "true" ]]; then
   OPTIONS_JSON="${OPTIONS_JSON}}"
 fi
 
-echo "Submitting job for ${URL}"
-if [[ -n "${OPTIONS_JSON}" ]]; then
-  JOB_BODY="{\"url\":\"${URL}\",\"output_languages\":[\"en\",\"zh-CN\"],\"mode\":\"captions_first\",${OPTIONS_JSON}}"
-else
-  JOB_BODY="{\"url\":\"${URL}\",\"output_languages\":[\"en\",\"zh-CN\"],\"mode\":\"captions_first\"}"
-fi
-echo "request body: ${JOB_BODY}"
-JOB_ID="$(
-  curl -fsS -X POST "${BASE_URL}/jobs" \
-    -H 'Content-Type: application/json' \
-    -d "${JOB_BODY}" \
-  | "${PYTHON}" -c 'import json,sys; print(json.load(sys.stdin)["job_id"])'
-)"
-
-echo "job_id=${JOB_ID}"
+# Submit every URL up front so the worker pool processes them in parallel.
+# Bash 3.2 (macOS): parallel indexed arrays, no associative arrays.
+JOB_IDS=()
+for URL in "${URLS[@]}"; do
+  echo "Submitting job for ${URL}"
+  if [[ -n "${OPTIONS_JSON}" ]]; then
+    JOB_BODY="{\"url\":\"${URL}\",\"output_languages\":[\"en\",\"zh-CN\"],\"mode\":\"captions_first\",${OPTIONS_JSON}}"
+  else
+    JOB_BODY="{\"url\":\"${URL}\",\"output_languages\":[\"en\",\"zh-CN\"],\"mode\":\"captions_first\"}"
+  fi
+  echo "request body: ${JOB_BODY}"
+  JOB_ID="$(
+    curl -fsS -X POST "${BASE_URL}/jobs" \
+      -H 'Content-Type: application/json' \
+      -d "${JOB_BODY}" \
+    | "${PYTHON}" -c 'import json,sys; print(json.load(sys.stdin)["job_id"])'
+  )"
+  echo "job_id=${JOB_ID}"
+  JOB_IDS+=("${JOB_ID}")
+done
 
 ATTEMPTS=0
+# MAX_POLLS counts poll cycles for the whole batch. Parallel jobs overlap, so
+# the default usually suffices; raise it for large batches.
 MAX_ATTEMPTS="${OVS_TEST_MAX_POLLS:-180}"
 SLEEP_SECONDS="${OVS_TEST_POLL_INTERVAL:-2}"
 
+JOB_STATES=()
+for _ in "${JOB_IDS[@]}"; do
+  JOB_STATES+=("")
+done
+ANY_FAILED=0
+
 while true; do
-  STATUS_JSON="$(curl -fsS "${BASE_URL}/jobs/${JOB_ID}")"
-  STATUS="$(
-    printf '%s' "${STATUS_JSON}" | "${PYTHON}" -c 'import json,sys; print(json.load(sys.stdin)["status"])'
-  )"
-  STAGE="$(
-    printf '%s' "${STATUS_JSON}" | "${PYTHON}" -c 'import json,sys; print(json.load(sys.stdin)["progress_stage"])'
-  )"
-  echo "status=${STATUS} stage=${STAGE}"
+  PENDING=0
+  for i in "${!JOB_IDS[@]}"; do
+    if [[ -n "${JOB_STATES[$i]}" ]]; then
+      continue
+    fi
+    JOB_ID="${JOB_IDS[$i]}"
+    STATUS_JSON="$(curl -fsS "${BASE_URL}/jobs/${JOB_ID}")"
+    STATUS="$(
+      printf '%s' "${STATUS_JSON}" | "${PYTHON}" -c 'import json,sys; print(json.load(sys.stdin)["status"])'
+    )"
+    STAGE="$(
+      printf '%s' "${STATUS_JSON}" | "${PYTHON}" -c 'import json,sys; print(json.load(sys.stdin)["progress_stage"])'
+    )"
+    echo "job=${JOB_ID} status=${STATUS} stage=${STAGE}"
 
-  if [[ "${STATUS}" == "completed" ]]; then
+    if [[ "${STATUS}" == "completed" ]]; then
+      JOB_STATES[$i]="completed"
+    elif [[ "${STATUS}" == "failed" ]]; then
+      # A failed job must not abort the loop; let sibling jobs finish.
+      JOB_STATES[$i]="failed"
+      ANY_FAILED=1
+      echo "error: job ${JOB_ID} (${URLS[$i]}) failed" >&2
+      printf '%s\n' "${STATUS_JSON}" >&2
+    else
+      PENDING=1
+    fi
+  done
+
+  if (( PENDING == 0 )); then
     break
-  fi
-
-  if [[ "${STATUS}" == "failed" ]]; then
-    echo "error: job failed" >&2
-    printf '%s\n' "${STATUS_JSON}" >&2
-    echo "backend log tail:" >&2
-    tail -n 80 "${SERVER_LOG}" >&2 || true
-    exit 1
   fi
 
   ATTEMPTS=$((ATTEMPTS + 1))
   if (( ATTEMPTS >= MAX_ATTEMPTS )); then
-    echo "error: timed out waiting for job ${JOB_ID}" >&2
-    printf '%s\n' "${STATUS_JSON}" >&2
+    echo "error: timed out waiting for jobs" >&2
     tail -n 80 "${SERVER_LOG}" >&2 || true
     exit 1
   fi
@@ -159,13 +197,18 @@ while true; do
   sleep "${SLEEP_SECONDS}"
 done
 
-RESULT_JSON="$(curl -fsS "${BASE_URL}/jobs/${JOB_ID}/result")"
-RESULT_PATH="${LOG_DIR}/${JOB_ID}-result.json"
-printf '%s\n' "${RESULT_JSON}" > "${RESULT_PATH}"
+for i in "${!JOB_IDS[@]}"; do
+  JOB_ID="${JOB_IDS[$i]}"
+  if [[ "${JOB_STATES[$i]}" != "completed" ]]; then
+    continue
+  fi
+  RESULT_JSON="$(curl -fsS "${BASE_URL}/jobs/${JOB_ID}/result")"
+  RESULT_PATH="${LOG_DIR}/${JOB_ID}-result.json"
+  printf '%s\n' "${RESULT_JSON}" > "${RESULT_PATH}"
 
-echo "Job completed successfully."
-echo "Saved result to ${RESULT_PATH}"
-RESULT_PATH="${RESULT_PATH}" POWER_MODE="${POWER_MODE}" "${PYTHON}" - <<'PY'
+  echo "Job ${JOB_ID} (${URLS[$i]}) completed successfully."
+  echo "Saved result to ${RESULT_PATH}"
+  RESULT_PATH="${RESULT_PATH}" POWER_MODE="${POWER_MODE}" "${PYTHON}" - <<'PY'
 import json
 import os
 
@@ -186,3 +229,10 @@ else:
     print(f"summary_en={overall['summary_en']}")
     print(f"summary_zh={overall['summary_zh']}")
 PY
+done
+
+if (( ANY_FAILED )); then
+  echo "error: one or more jobs failed. Backend log tail:" >&2
+  tail -n 80 "${SERVER_LOG}" >&2 || true
+  exit 1
+fi

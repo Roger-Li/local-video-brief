@@ -240,3 +240,21 @@ def test_find_subtitles_for_family_returns_existing_english_first(tmp_path: Path
 
     assert [artifact.language for artifact in english] == ["en"]
     assert [artifact.language for artifact in chinese] == ["zh-Hans"]
+
+
+def test_worker_concurrency_default_is_two(monkeypatch) -> None:
+    monkeypatch.delenv("OVS_WORKER_CONCURRENCY", raising=False)
+    assert Settings().worker_concurrency == 2
+
+
+def test_worker_concurrency_env_override(monkeypatch) -> None:
+    monkeypatch.setenv("OVS_WORKER_CONCURRENCY", "4")
+    assert Settings().worker_concurrency == 4
+
+
+def test_worker_concurrency_zero_raises(monkeypatch) -> None:
+    import pytest
+
+    monkeypatch.setenv("OVS_WORKER_CONCURRENCY", "0")
+    with pytest.raises(ValueError, match="OVS_WORKER_CONCURRENCY"):
+        Settings()
