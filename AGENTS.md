@@ -46,6 +46,7 @@ This repository builds a local-first video summary tool for Apple Silicon Macs. 
 - `OVS_ENABLE_TRANSCRIPT_NORMALIZATION=true` (default) runs dedup/cleanup; set to `false` to bypass.
 - The smoke-test script accepts `OVS_TEST_PYTHON` to override the Python interpreter (e.g., `OVS_TEST_PYTHON=$HOME/ml-env/bin/python`).
 - `OVS_COOKIES_FILE` points to a Netscape cookies.txt file for yt-dlp authentication (e.g., bilibili). `OVS_COOKIES_FROM_BROWSER` is an alternative that reads cookies from a browser directly (e.g., `brave`). File takes precedence if browser is unset; browser takes precedence if both are set. Required for bilibili videos.
+- Cookies are never sent to YouTube hosts (`COOKIE_EXEMPT_HOST_SUFFIXES` in `video_source.py`). yt-dlp rewrites its cookie jar after every run, so a shared cookies.txt accumulates YouTube session cookies; once stale they make YouTube issue session-bound media URLs and the CDN returns HTTP 403 on `videoplayback`. YouTube needs no auth here, so it is excluded.
 
 ## Caption Fetch Policy
 

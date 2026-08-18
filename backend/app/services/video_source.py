@@ -6,11 +6,34 @@ import time
 from pathlib import Path
 import subprocess
 from typing import Dict, List, Optional
+from urllib.parse import urlparse
 
 from backend.app.services.interfaces import AudioArtifact, SourceInspection, SubtitleArtifact
 from backend.app.services.storage import StorageService
 
 logger = logging.getLogger(__name__)
+
+# yt-dlp writes its cookie jar back to disk after every run, so a cookies.txt kept
+# for bilibili steadily accumulates YouTube session cookies. Once those go stale
+# YouTube issues session-bound media URLs and the CDN answers videoplayback with
+# HTTP 403, which fails the job even though the same video downloads fine with no
+# cookies at all. YouTube needs no authentication here, so never send it cookies.
+YOUTUBE_HOST_SUFFIXES = (
+    "youtube.com",
+    "youtu.be",
+    "youtube-nocookie.com",
+)
+
+COOKIE_EXEMPT_HOST_SUFFIXES = (
+    *YOUTUBE_HOST_SUFFIXES,
+    "googlevideo.com",
+)
+
+# YouTube is rolling out GVS PO-token enforcement. With affected sessions,
+# yt-dlp's default android_vr client can enumerate formats but the CDN rejects
+# the selected media URL with HTTP 403. The TV client may expose DRM-free media,
+# while web_embedded provides a token-free fallback for embeddable videos.
+YOUTUBE_403_FALLBACK_EXTRACTOR_ARGS = "youtube:player_client=tv,web_embedded"
 
 
 class VideoSourceError(RuntimeError):
@@ -33,10 +56,32 @@ class YtDlpVideoSourceClient:
         elif cookies_file:
             self._cookie_args = ["--cookies", cookies_file]
 
+    def _cookie_args_for(self, url: str) -> List[str]:
+        if not self._cookie_args:
+            return []
+        host = self._url_host(url)
+        if self._host_matches(host, COOKIE_EXEMPT_HOST_SUFFIXES):
+            logger.debug("skipping cookies for %s (cookie-exempt host)", host)
+            return []
+        return self._cookie_args
+
+    def _is_youtube_url(self, url: str) -> bool:
+        return self._host_matches(self._url_host(url), YOUTUBE_HOST_SUFFIXES)
+
+    @staticmethod
+    def _url_host(url: str) -> str:
+        return (urlparse(url).hostname or "").lower()
+
+    @staticmethod
+    def _host_matches(host: str, suffixes: tuple[str, ...]) -> bool:
+        return any(host == suffix or host.endswith(f".{suffix}") for suffix in suffixes)
+
     def inspect(self, url: str) -> SourceInspection:
         logger.info("inspect: fetching metadata for %s", url)
         t0 = time.perf_counter()
-        result = self._run_command(["yt-dlp", *self._cookie_args, "--dump-single-json", "--no-warnings", url])
+        result = self._run_command(
+            ["yt-dlp", *self._cookie_args_for(url), "--dump-single-json", "--no-warnings", url]
+        )
         data = json.loads(result.stdout)
         provider = data.get("extractor_key", "unknown")
         title = data.get("title", "?")
@@ -72,10 +117,43 @@ class YtDlpVideoSourceClient:
         logger.info("download_audio: job=%s url=%s", job_id, url)
         job_dir = self.storage.job_dir(job_id)
         output_template = str(job_dir / "audio.%(ext)s")
-        self._run_command(
+        command = self._audio_download_command(url, output_template)
+        try:
+            self._run_command(command)
+        except VideoSourceError as exc:
+            if not self._is_youtube_url(url) or not self._is_http_403_error(exc):
+                raise
+            logger.warning(
+                "download_audio: YouTube returned HTTP 403; retrying job=%s "
+                "with alternate player clients",
+                job_id,
+            )
+            self._remove_partial_audio_downloads(job_dir)
+            self._run_command(
+                self._audio_download_command(
+                    url,
+                    output_template,
+                    extractor_args=YOUTUBE_403_FALLBACK_EXTRACTOR_ARGS,
+                )
+            )
+        matches = sorted(job_dir.glob("audio.*"))
+        if not matches:
+            raise VideoSourceError("Audio download succeeded but no output file was found.")
+        audio = matches[0]
+        logger.info("download_audio: saved %s (%.1f MB)", audio.name, audio.stat().st_size / (1024 * 1024))
+        return AudioArtifact(path=audio, format=audio.suffix.lstrip("."))
+
+    def _audio_download_command(
+        self,
+        url: str,
+        output_template: str,
+        extractor_args: str = "",
+    ) -> List[str]:
+        command = ["yt-dlp", *self._cookie_args_for(url)]
+        if extractor_args:
+            command.extend(["--extractor-args", extractor_args])
+        command.extend(
             [
-                "yt-dlp",
-                *self._cookie_args,
                 "--extract-audio",
                 "--audio-format",
                 "mp3",
@@ -84,12 +162,18 @@ class YtDlpVideoSourceClient:
                 url,
             ]
         )
-        matches = sorted(job_dir.glob("audio.*"))
-        if not matches:
-            raise VideoSourceError("Audio download succeeded but no output file was found.")
-        audio = matches[0]
-        logger.info("download_audio: saved %s (%.1f MB)", audio.name, audio.stat().st_size / (1024 * 1024))
-        return AudioArtifact(path=audio, format=audio.suffix.lstrip("."))
+        return command
+
+    @staticmethod
+    def _is_http_403_error(exc: VideoSourceError) -> bool:
+        message = str(exc).lower()
+        return "http error 403" in message or "403 forbidden" in message
+
+    @staticmethod
+    def _remove_partial_audio_downloads(job_dir: Path) -> None:
+        for path in job_dir.glob("audio.*"):
+            if path.name.endswith((".part", ".ytdl")):
+                path.unlink(missing_ok=True)
 
     def _run_command(self, args: List[str]) -> subprocess.CompletedProcess:
         try:
@@ -111,7 +195,7 @@ class YtDlpVideoSourceClient:
             self._run_command(
                 [
                     "yt-dlp",
-                    *self._cookie_args,
+                    *self._cookie_args_for(url),
                     "--skip-download",
                     "--write-subs",
                     "--write-auto-subs",
