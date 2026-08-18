@@ -48,4 +48,41 @@ describe("JobList", () => {
     const { container } = render(<JobList jobs={[]} selectedJobId={null} onSelect={vi.fn()} />);
     expect(container.firstChild).toBeNull();
   });
+
+  it("paginates long job histories", () => {
+    const jobs = Array.from({ length: 10 }, (_, index) =>
+      makeJob({
+        job_id: `job-${index + 1}`,
+        url: `https://youtu.be/video-${index + 1}`,
+      }),
+    );
+
+    render(<JobList jobs={jobs} selectedJobId={null} onSelect={vi.fn()} />);
+
+    expect(screen.getByText("https://youtu.be/video-1")).toBeInTheDocument();
+    expect(screen.queryByText("https://youtu.be/video-9")).not.toBeInTheDocument();
+    expect(screen.getByText("1–8 of 10")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Previous jobs page" })).toBeDisabled();
+
+    fireEvent.click(screen.getByRole("button", { name: "Next jobs page" }));
+
+    expect(screen.queryByText("https://youtu.be/video-1")).not.toBeInTheDocument();
+    expect(screen.getByText("https://youtu.be/video-9")).toBeInTheDocument();
+    expect(screen.getByText("9–10 of 10")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Next jobs page" })).toBeDisabled();
+  });
+
+  it("opens the page containing the selected job", () => {
+    const jobs = Array.from({ length: 10 }, (_, index) =>
+      makeJob({
+        job_id: `job-${index + 1}`,
+        url: `https://youtu.be/video-${index + 1}`,
+      }),
+    );
+
+    render(<JobList jobs={jobs} selectedJobId="job-10" onSelect={vi.fn()} />);
+
+    expect(screen.getByText("https://youtu.be/video-10")).toBeInTheDocument();
+    expect(screen.getByText("9–10 of 10")).toBeInTheDocument();
+  });
 });
